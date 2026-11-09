@@ -81,3 +81,12 @@ textarea { min-height: 72px; }
 .toast { position: fixed; left: 50%; bottom: calc(20px + env(safe-area-inset-bottom)); transform: translateX(-50%); background: var(--marron); color: var(--blanco); padding: 12px 18px; border-radius: 14px; z-index: 30; max-width: 90vw; font-size: 15px; }
 .foto { margin: 0; background: #fff; border-radius: var(--radio); overflow: hidden; }
 .foto img { display: block; width: 100%; max-height: 320px; object-fit: contain; background: #fff; }
+.con-mini { flex-direction: row; align-items: center; gap: 12px; }
+.con-mini .cuerpo { display: flex; flex-direction: column; gap: 6px; flex: 1; min-width: 0; }
+.mini { width: 56px; height: 56px; flex: 0 0 56px; border-radius: 12px; background: var(--cielo-claro); display: grid; place-items: center; overflow: hidden; position: relative; }
+.mini img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; background: #fff; opacity: 0; }
+.mini img.cargada { opacity: 1; }
+.par { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.par .lado { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; font-size: 14px; }
+.par .lado .mini { width: 100%; height: 110px; flex: none; }
+.par label.check { font-size: 14px; }

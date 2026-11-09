@@ -2,10 +2,10 @@
 import { leerCodigo } from './gs1.js';
 import {
   stockActual, lotesDe, totalDe, formatoCantidad, avisos, nuevoIdProducto, nuevoUuid,
-  unidadesSalida, normaliza, diasEntre, finCaducidad
+  unidadesSalida, normaliza, diasEntre, finCaducidad, posiblesDuplicados, parecidos
 } from './logica.js';
 
-const VERSION_APP = '1.3.0';
+const VERSION_APP = '1.4.0';
 const $ = (s) => document.querySelector(s);
 const vista = $('#vista');
 
@@ -107,7 +107,8 @@ async function api(accion, extra = {}) {
 function aplicarEstado(j) {
   datos = {
     productos: j.productos, codigos: j.codigos, config: j.config, dotacion: j.dotacion,
-    stock: j.stock, reposiciones: j.reposiciones, movimientos: j.movimientos, ultimaCopia: j.ultimaCopia, version: j.version
+    stock: j.stock, reposiciones: j.reposiciones, movimientos: j.movimientos, ultimaCopia: j.ultimaCopia, version: j.version,
+    catalogo: j.catalogo || [], noDuplicados: j.noDuplicados || []
   };
   guardar('datos', datos);
   ultimaSync = new Date().toISOString();
@@ -150,6 +151,8 @@ async function sincronizar(silencioso = true) {
 function resumenOp(op) {
   if (!op) return '';
   if (op.tipo === 'producto') return 'Ficha: ' + op.producto.nombre;
+  if (op.tipo === 'fusionar') return 'Combinar productos';
+  if (op.tipo === 'no_duplicado') return 'Marcar como distintos';
   const m = op.movimiento, p = prods().get(m.producto_id);
   return `${m.tipo} · ${p ? p.nombre : m.producto_id} · ${m.cantidad}${m.lote ? ' · lote ' + m.lote : ''}`;
 }
@@ -174,18 +177,67 @@ function encolar(op) {
 
 /* ───────────── Fotos de producto (caché del navegador) ───────────── */
 const CACHE_FOTOS = 'fotos-productos';
-async function fotoLocal(pid) {
-  try { const r = await (await caches.open(CACHE_FOTOS)).match('foto/' + pid); return r ? await r.text() : ''; } catch { return ''; }
+async function leerCache(k) {
+  try { const r = await (await caches.open(CACHE_FOTOS)).match(k); return r ? await r.text() : ''; } catch { return ''; }
 }
+async function escribirCache(k, v) {
+  try { await (await caches.open(CACHE_FOTOS)).put(k, new Response(v)); } catch { /* sin caché */ }
+}
+/** Guarda una foto recién hecha (base64 JPEG) como foto del producto en el móvil. */
 async function guardarFotoLocal(pid, b64) {
-  try { await (await caches.open(CACHE_FOTOS)).put('foto/' + pid, new Response(b64)); } catch { /* sin caché */ }
+  await escribirCache('foto/' + pid, 'data:image/jpeg;base64,' + b64);
+  await escribirCache('mini/' + pid, '');
 }
+/** Foto del producto como data URL ('' si no tiene). */
 async function fotoProducto(pid) {
-  let b64 = await fotoLocal(pid);
-  if (b64) return b64;
-  try { b64 = (await api('foto', { producto_id: pid })).base64 || ''; } catch { return ''; }
-  if (b64) await guardarFotoLocal(pid, b64);
-  return b64;
+  let url = await leerCache('foto/' + pid);
+  if (url) return url;
+  try {
+    const j = await api('foto', { producto_id: pid });
+    if (j.base64) url = `data:${j.tipo || 'image/jpeg'};base64,${j.base64}`;
+  } catch { return ''; }
+  if (url) await escribirCache('foto/' + pid, url);
+  return url;
+}
+/** Miniatura (120 px) para las listas. */
+async function miniatura(pid) {
+  let m = await leerCache('mini/' + pid);
+  if (m) return m;
+  const url = await fotoProducto(pid);
+  if (!url) return '';
+  m = await new Promise((ok) => {
+    const img = new Image();
+    img.onload = () => {
+      const k = Math.min(1, 120 / Math.max(img.naturalWidth, img.naturalHeight));
+      const c = document.createElement('canvas'); c.width = Math.round(img.naturalWidth * k); c.height = Math.round(img.naturalHeight * k);
+      const g = c.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height); g.drawImage(img, 0, 0, c.width, c.height);
+      ok(c.toDataURL('image/jpeg', 0.8));
+    };
+    img.onerror = () => ok('');
+    img.src = url;
+  });
+  if (m) await escribirCache('mini/' + pid, m);
+  return m;
+}
+// Carga perezosa de miniaturas: solo las que se ven, de dos en dos.
+const colaMini = []; let miniActivas = 0;
+function siguienteMini() {
+  while (miniActivas < 2 && colaMini.length) {
+    const img = colaMini.shift();
+    if (!img.isConnected) continue;
+    miniActivas++;
+    miniatura(img.dataset.mini).then((u) => { if (u) { img.src = u; img.classList.add('cargada'); } }).finally(() => { miniActivas--; siguienteMini(); });
+  }
+}
+const observadorMini = 'IntersectionObserver' in window ? new IntersectionObserver((ents) => {
+  ents.forEach((e) => { if (e.isIntersecting) { observadorMini.unobserve(e.target); colaMini.push(e.target); siguienteMini(); } });
+}, { rootMargin: '200px' }) : null;
+function activarMiniaturas(raiz) {
+  raiz.querySelectorAll('img[data-mini]').forEach((img) => { if (observadorMini) observadorMini.observe(img); else { colaMini.push(img); siguienteMini(); } });
+}
+const icoCaja = '<svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="#B3DDDD" stroke-width="1.6" aria-hidden="true"><path d="M3 7l9-4 9 4-9 4-9-4zM3 7v10l9 4 9-4V7M12 11v10"/></svg>';
+function cajaMini(pr) {
+  return `<span class="mini">${pr.con_foto ? `<img data-mini="${h(pr.id)}" alt="">` : ''}${icoCaja}</span>`;
 }
 
 /* ───────────── Escáner ───────────── */
@@ -272,6 +324,17 @@ function escanearPara(intencion) {
   });
 }
 
+/** Combina el producto `de` en `en` (como los contactos): se conserva `en`. */
+function combinar(de, en) {
+  encolar({ tipo: 'fusionar', de, en });
+  datos.productos = datos.productos.map((x) => (x.id === de ? { ...x, activo: false, fusionado_en: en } : x));
+  datos.codigos = datos.codigos.map((c) => (c.producto_id === de ? { ...c, producto_id: en } : c));
+  datos.catalogo = (datos.catalogo || []).map((c) => (c.producto_id === de ? { ...c, producto_id: en } : c));
+  datos.stock = datos.stock.map((x) => (x.producto_id === de ? { ...x, producto_id: en } : x));
+  guardar('datos', datos);
+  aviso('Productos combinados');
+}
+
 function volverAProducto(pid) {
   const prev = pila[pila.length - 2];
   if (prev && prev.nombre === 'producto' && prev.params.pid === pid) { prev.params.lec = null; atras(); }
@@ -299,6 +362,8 @@ VISTAS.inicio = () => {
   const identificando = datos.productos.filter((x) => x.activo && x.estado_ia === 'pendiente').length;
   if (revisar) filas.push(`<button class="aviso-fila" data-filtro="revisar"><span>Productos por revisar</span><span class="chip aviso">${revisar}</span></button>`);
   if (identificando) filas.push(`<button class="aviso-fila" data-filtro="revisar"><span>Identificándose (foto e internet)</span><span class="chip">${identificando}</span></button>`);
+  const nDup = posiblesDuplicados(datos.productos, datos.catalogo || [], datos.noDuplicados || []).length;
+  if (nDup) filas.push(`<button class="aviso-fila" data-ir="duplicados"><span>Posibles duplicados</span><span class="chip">${nDup}</span></button>`);
   if (a.gabinetes.length) filas.push(`<button class="aviso-fila" data-ir="gabinetes"><span>Gabinetes · revisar dotación</span><span class="chip">${a.gabinetes.length}</span></button>`);
   if (cola.length) filas.push(`<button class="aviso-fila" data-sync><span>Movimientos sin enviar</span><span class="chip aviso">${cola.length}</span></button>`);
   if (rechazos.length) filas.push(`<button class="aviso-fila" data-ir="ajustes"><span>Rechazados por el servidor</span><span class="chip error">${rechazos.length}</span></button>`);
@@ -309,7 +374,7 @@ VISTAS.inicio = () => {
     <nav class="rejilla" aria-label="Acciones">
       <button class="mosaico" data-intencion="entrada"><b>Entrada</b>Escanear o buscar</button>
       <button class="mosaico" data-intencion="salida"><b>Salida</b>Consumo, gabinete o caja</button>
-      <button class="mosaico" data-ir="stock"><b>Stock</b>${datos.productos.filter((p) => p.activo).length} productos</button>
+      <button class="mosaico" data-ir="stock"><b>Stock</b>${datos.productos.filter((p) => p.activo && totalDe(s, p.id) > 0).length} con stock · ${datos.productos.filter((p) => p.activo).length} en catálogo</button>
       <button class="mosaico" data-ir="gabinetes"><b>Gabinetes</b>Dotación y reposición</button>
     </nav>
     <section class="lista" aria-label="Avisos">
@@ -331,12 +396,14 @@ VISTAS.inicio = () => {
 VISTAS.stock = (p) => {
   titulo(p.elegir ? 'Elegir producto' : 'Stock');
   const s = st();
-  const estado = { texto: p.texto || '', filtro: p.filtro || 'todo', armario: p.armario || '' };
+  const estado = { texto: p.texto || '', filtro: p.filtro || (p.elegir ? 'todo' : 'con'), armario: p.armario || '' };
+  const refsDe = new Map();
+  for (const c of datos.catalogo || []) { if (!refsDe.has(c.producto_id)) refsDe.set(c.producto_id, []); refsDe.get(c.producto_id).push(c.ref + ' ' + c.proveedor + ' ' + c.descripcion); }
   const armarios = (datos.config.armario || []).map((a) => a.nombre);
   vista.innerHTML = `
     <label>Buscar<input type="search" id="buscar" placeholder="Nombre, referencia o proveedor" value="${h(estado.texto)}" autocomplete="off"></label>
     <div class="segmentos" role="group" aria-label="Filtro">
-      ${[['todo', 'Todo'], ['bajo', 'Bajo mínimo'], ['caduca', 'Caduca pronto'], ['sin', 'Sin stock'], ['revisar', 'Por revisar']].map(([k, t]) => `<button data-f="${k}" aria-pressed="${estado.filtro === k}">${t}</button>`).join('')}
+      ${[['con', 'Con stock'], ['todo', 'Todo el catálogo'], ['bajo', 'Bajo mínimo'], ['caduca', 'Caduca pronto'], ['revisar', 'Por revisar']].map(([k, t]) => `<button data-f="${k}" aria-pressed="${estado.filtro === k}">${t}</button>`).join('')}
     </div>
     <label>Armario<select id="armario"><option value="">Todos</option>${armarios.map((a) => `<option ${a === estado.armario ? 'selected' : ''}>${h(a)}</option>`).join('')}</select></label>
     <div class="lista" id="res"></div>`;
@@ -347,27 +414,35 @@ VISTAS.stock = (p) => {
     const lista = datos.productos.filter((pr) => {
       if (!pr.activo) return false;
       if (estado.armario && pr.armario !== estado.armario) return false;
-      if (q && !normaliza(`${pr.nombre} ${pr.ref_proveedor} ${pr.proveedor} ${pr.categoria}`).includes(q)) return false;
+      if (q && !normaliza(`${pr.nombre} ${pr.ref_proveedor} ${pr.proveedor} ${pr.categoria} ${(refsDe.get(pr.id) || []).join(' ')}`).includes(q)) return false;
       const t = totalDe(s, pr.id);
+      if (estado.filtro === 'con') return t > 0 || !!pr.estado_ia;
       if (estado.filtro === 'bajo') return pr.minimo > 0 && t < pr.minimo;
       if (estado.filtro === 'caduca') return caducan.has(pr.id);
-      if (estado.filtro === 'sin') return t <= 0;
       if (estado.filtro === 'revisar') return !!pr.estado_ia;
       return true;
     }).sort((x, y) => x.nombre.localeCompare(y.nombre, 'es'));
-    $('#res').innerHTML = lista.length ? lista.map((pr) => {
+    const total = lista.length;
+    const visibles = lista.slice(0, estado.max || 120);
+    $('#res').innerHTML = visibles.length ? visibles.map((pr) => {
       const t = totalDe(s, pr.id);
       const lotes = lotesDe(s, pr.id);
       const bajo = pr.minimo > 0 && t < pr.minimo;
       const prox = lotes.find((l) => l.caducidad);
-      return `<button class="tarjeta item" data-pid="${h(pr.id)}">
-        <span class="entre"><span class="fuerte">${h(pr.nombre)}</span><span class="cifra">${h(formatoCantidad(t, pr))}</span></span>
-        <span class="entre peq"><span>${h([pr.categoria, pr.armario].filter(Boolean).join(' · '))}${prox ? ' · cad. ' + cad(prox.caducidad) : ''}</span>${pr.estado_ia === 'pendiente' ? '<span class="chip">identificando</span>' : pr.estado_ia ? '<span class="chip aviso">revisar</span>' : bajo ? `<span class="chip aviso">mín. ${pr.minimo}</span>` : ''}</span>
+      return `<button class="tarjeta item con-mini" data-pid="${h(pr.id)}">
+        ${cajaMini(pr)}
+        <span class="cuerpo">
+          <span class="entre"><span class="fuerte">${h(pr.nombre)}</span><span class="cifra">${h(formatoCantidad(t, pr))}</span></span>
+          <span class="entre peq"><span>${h([pr.proveedor, pr.armario].filter(Boolean).join(' · '))}${prox ? ' · cad. ' + cad(prox.caducidad) : ''}</span>${pr.estado_ia === 'pendiente' ? '<span class="chip">identificando</span>' : pr.estado_ia ? '<span class="chip aviso">revisar</span>' : bajo ? `<span class="chip aviso">mín. ${pr.minimo}</span>` : ''}</span>
+        </span>
       </button>`;
-    }).join('') : `<p class="vacio">${datos.productos.length ? 'Nada con ese filtro.' : 'Aún no hay productos. Escanea una caja o crea uno nuevo.'}</p>`;
+    }).join('') + (total > visibles.length ? `<button class="btn claro" id="mas">Ver más (${total - visibles.length})</button>` : '')
+      : `<p class="vacio">${datos.productos.length ? (estado.filtro === 'con' ? 'Nada en stock con ese filtro. Prueba «Todo el catálogo».' : 'Nada con ese filtro.') : 'Aún no hay productos. Escanea una caja o crea uno nuevo.'}</p>`;
+    if ($('#mas')) $('#mas').onclick = () => { estado.max = (estado.max || 120) + 200; pintarLista(); };
+    activarMiniaturas($('#res'));
     $('#res').querySelectorAll('[data-pid]').forEach((b) => { b.onclick = () => abrirProducto(b.dataset.pid, p.elegir || 'ver'); });
   };
-  $('#buscar').oninput = (e) => { estado.texto = e.target.value; p.texto = estado.texto; pintarLista(); };
+  $('#buscar').oninput = (e) => { estado.texto = e.target.value; p.texto = estado.texto; estado.max = 0; pintarLista(); };
   $('#armario').onchange = (e) => { estado.armario = e.target.value; p.armario = estado.armario; pintarLista(); };
   vista.querySelectorAll('[data-f]').forEach((b) => {
     b.onclick = () => {
@@ -389,8 +464,10 @@ VISTAS.producto = ({ pid, lec }) => {
   const movs = datos.movimientos.filter((m) => m.producto_id === pid).slice(-25).reverse();
   const pend = cola.filter((o) => o.tipo === 'movimiento' && o.movimiento.producto_id === pid);
   const cods = datos.codigos.filter((c) => c.producto_id === pid).map((c) => c.codigo);
+  const refs = (datos.catalogo || []).filter((c) => c.producto_id === pid).sort((x, y) => String(y.fecha).localeCompare(String(x.fecha)));
+  const iguales = pr.estado_ia === 'revisar' ? parecidos(pr, datos.productos, 3) : [];
   const ia = pr.estado_ia === 'pendiente' ? '<p class="nota info">Identificando el producto (foto e internet). Puedes seguir trabajando: el nombre se completa solo en un par de minutos.</p>'
-    : pr.estado_ia === 'revisar' ? '<section class="tarjeta suave"><span class="fuerte">Revisa los datos que ha puesto la IA</span><span class="peq">Nombre, marca, referencia y categoría. Si están bien, pulsa «Correcto».</span><div class="fila"><button class="btn" id="iaOk" style="flex:1">Correcto</button><button class="btn claro" id="iaEditar" style="flex:1">Corregir</button></div></section>'
+    : pr.estado_ia === 'revisar' ? '<section class="tarjeta suave"><span class="fuerte">Revisa los datos que ha puesto la IA</span><span class="peq">Nombre, marca, referencia y categoría. Si están bien, pulsa «Correcto».</span><div class="fila"><button class="btn" id="iaOk" style="flex:1">Correcto</button><button class="btn claro" id="iaEditar" style="flex:1">Corregir</button></div>' + (iguales.length ? '<span class="fuerte" style="margin-top:6px">¿Es alguno de estos que ya tenéis?</span>' + iguales.map((x) => `<div class="hist"><span>${h(x.nombre)}<br><span class="peq">${h([x.proveedor, x.ref_proveedor].filter(Boolean).join(' · '))}</span></span><button class="btn borde" style="min-height:40px" data-mismo="${h(x.id)}">Es este</button></div>`).join('') : '') + '</section>'
     : pr.estado_ia === 'error' ? '<p class="nota">No se ha podido identificar automáticamente. Pulsa «Editar ficha» y escribe el nombre.</p>' : '';
   vista.innerHTML = `
     ${ia}
@@ -418,6 +495,7 @@ VISTAS.producto = ({ pid, lec }) => {
       <span id="txtFoto">${pr.con_foto ? 'Cambiar foto' : 'Añadir foto'}</span>
       <input type="file" accept="image/*" capture="environment" id="nuevaFoto" class="oculto">
     </label>
+    ${refs.length ? `<section class="tarjeta"><h2>Referencias por proveedor</h2>${refs.map((c) => `<div class="hist"><span>${h(c.proveedor)} · ${h(c.ref)}<br><span class="peq">${h(c.descripcion)}</span></span><span class="peq">${c.precio ? h(c.precio.toFixed(2).replace('.', ',')) + ' €' : ''}<br>${h(c.fecha ? fechaCorta(c.fecha) : '')}</span></div>`).join('')}</section>` : ''}
     <p class="peq">Códigos: ${cods.length ? cods.map(h).join(', ') : 'ninguno'}</p>`;
   if ($('#iaOk')) $('#iaOk').onclick = () => {
     const nuevo = { ...pr, estado_ia: '' };
@@ -426,13 +504,21 @@ VISTAS.producto = ({ pid, lec }) => {
     guardar('datos', datos); aviso('Datos confirmados'); pintar();
   };
   if ($('#iaEditar')) $('#iaEditar').onclick = () => ir('ficha', { pid });
+  vista.querySelectorAll('[data-mismo]').forEach((b) => {
+    b.onclick = () => {
+      const otro = prods().get(b.dataset.mismo);
+      if (!confirm(`¿Combinar con «${otro.nombre}»? Se conserva ese nombre; el código, la foto y el stock pasan a él.`)) return;
+      combinar(pid, otro.id);
+      ir('producto', { pid: otro.id }, true);
+    };
+  });
   $('#bEntrada').onclick = () => ir('entrada', { pid, lec });
   $('#bSalida').onclick = () => ir('salida', { pid, lec });
   $('#bAjuste').onclick = () => ir('ajuste', { pid });
-  const mostrarFoto = (b64) => {
+  const mostrarFoto = (url) => {
     const f = $('#fotoProd');
-    if (!f || !b64) return;
-    f.querySelector('img').src = 'data:image/jpeg;base64,' + b64;
+    if (!f || !url) return;
+    f.querySelector('img').src = url;
     f.hidden = false;
   };
   if (pr.con_foto || pr._fotoLocal) fotoProducto(pid).then((b) => { if (pila[pila.length - 1]?.params?.pid === pid) mostrarFoto(b); });
@@ -442,7 +528,7 @@ VISTAS.producto = ({ pid, lec }) => {
     const b64 = await fotoDeFichero(fich);
     if (!b64) { aviso('No se pudo leer la foto'); return; }
     await guardarFotoLocal(pid, b64);
-    mostrarFoto(b64);
+    mostrarFoto('data:image/jpeg;base64,' + b64);
     encolar({ tipo: 'producto', producto: { ...pr }, codigos: [], fotos: [b64], identificar: false });
     pr._fotoLocal = true; pr.con_foto = true; guardar('datos', datos);
     $('#txtFoto').textContent = 'Cambiar foto';
@@ -759,6 +845,49 @@ VISTAS.ajuste = ({ pid }) => {
     aviso(`Ajuste ${dif > 0 ? '+' : ''}${dif} registrado`);
     atras();
   };
+};
+
+VISTAS.duplicados = (p) => {
+  titulo('Posibles duplicados');
+  const pares = posiblesDuplicados(datos.productos, datos.catalogo || [], datos.noDuplicados || []);
+  const s = st();
+  const lado = (x, nombreRadio, marcado) => `<div class="lado">
+      ${cajaMini(x)}
+      <span class="fuerte">${h(x.nombre)}</span>
+      <span class="peq">${h([x.proveedor, x.ref_proveedor].filter(Boolean).join(' · '))}</span>
+      <span class="peq">Stock: ${h(formatoCantidad(totalDe(s, x.id), x))}</span>
+      <label class="check"><input type="radio" name="${nombreRadio}" value="${h(x.id)}" ${marcado ? 'checked' : ''}> Conservar este</label>
+    </div>`;
+  const peso = (x) => totalDe(s, x.id) * 10 + datos.codigos.filter((c) => c.producto_id === x.id).length * 5 + (x.con_foto ? 1 : 0);
+  vista.innerHTML = `
+    <p class="peq">Productos que podrían ser el mismo (por ejemplo, el mismo artículo comprado a dos depósitos). Al combinar, se queda un solo producto con todas sus referencias, códigos, fotos y stock. Nada se borra.</p>
+    ${pares.length ? pares.map((x, i) => {
+      const quedaA = peso(x.a) >= peso(x.b);
+      return `<section class="tarjeta" data-par="${i}">
+        <span class="peq">${h(x.motivo)}</span>
+        <div class="par">${lado(x.a, 'q' + i, quedaA)}${lado(x.b, 'q' + i, !quedaA)}</div>
+        <div class="fila"><button class="btn" data-combinar="${i}" style="flex:1">Combinar</button><button class="btn claro" data-distintos="${i}" style="flex:1">No son el mismo</button></div>
+      </section>`;
+    }).join('') : '<p class="vacio">No hay posibles duplicados.</p>'}`;
+  activarMiniaturas(vista);
+  vista.querySelectorAll('[data-combinar]').forEach((b) => {
+    b.onclick = () => {
+      const x = pares[Number(b.dataset.combinar)];
+      const en = vista.querySelector(`input[name="q${b.dataset.combinar}"]:checked`).value;
+      const de = en === x.a.id ? x.b.id : x.a.id;
+      combinar(de, en);
+      pintar();
+    };
+  });
+  vista.querySelectorAll('[data-distintos]').forEach((b) => {
+    b.onclick = () => {
+      const x = pares[Number(b.dataset.distintos)];
+      encolar({ tipo: 'no_duplicado', a: x.a.id, b: x.b.id });
+      datos.noDuplicados = [...(datos.noDuplicados || []), [x.a.id, x.b.id]];
+      guardar('datos', datos);
+      pintar();
+    };
+  });
 };
 
 VISTAS.pedido = () => {

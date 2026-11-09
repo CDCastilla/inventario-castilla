@@ -50,6 +50,20 @@ Para que al escanear un código nuevo la app lea el nombre de la caja sin escrib
 3. Menú de Chrome **⋮ → Instalar aplicación** (o *Añadir a pantalla de inicio*).
 4. La primera vez que escanees, permite el uso de la cámara.
 
+## Catálogo desde facturas
+El catálogo (proveedor, referencia, nombre y último precio de lo comprado) se carga desde un Excel preparado a
+partir de las facturas: `2026\Catalogo inventario app.xlsx` en la carpeta de facturas.
+1. En la hoja: **Archivo → Importar → Subir** ese Excel → **Insertar hojas nuevas**. Aparece la pestaña
+   **CATALOGO_IMPORTAR** (la pestaña *Resumen* se puede borrar).
+2. Menú **Inventario → Cargar catálogo**. Crea un producto por artículo y guarda sus referencias en **CATALOGO**.
+   Se puede repetir con un Excel nuevo: no duplica (clave proveedor + referencia) y actualiza precios.
+3. Las imágenes de los productos sin foto se buscan solas en internet (8 cada 15 minutos). Para acelerar:
+   **Inventario → Buscar imágenes e identificar ahora**.
+
+En la app, **Posibles duplicados** muestra parejas que podrían ser el mismo artículo (por ejemplo, comprado a
+dos depósitos con referencias distintas). **Combinar** deja uno solo con todas las referencias, códigos, fotos
+y stock; **No son el mismo** las separa para siempre. Las tallas, medidas y colores distintos no se proponen.
+
 ## Uso diario
 - **Escanear** una caja abre su ficha. Si el código es nuevo: (opcional) foto de la parte delantera y
   **Guardar y seguir**. El producto se crea con un nombre provisional y se sigue con la entrada sin esperar.

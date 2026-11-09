@@ -13,17 +13,19 @@
  *  - Editar la ficha de un producto nunca mueve stock.
  */
 
-var VERSION_SERVIDOR = '1.3.0';
+var VERSION_SERVIDOR = '1.4.0';
 
 var HOJAS = {
-  PRODUCTOS: ['id', 'nombre', 'categoria', 'proveedor', 'ref_proveedor', 'uds_envase', 'modo', 'lote', 'armario', 'minimo', 'activo', 'notas', 'actualizado', 'foto', 'estado_ia', 'intentos_ia'],
+  PRODUCTOS: ['id', 'nombre', 'categoria', 'proveedor', 'ref_proveedor', 'uds_envase', 'modo', 'lote', 'armario', 'minimo', 'activo', 'notas', 'actualizado', 'foto', 'estado_ia', 'intentos_ia', 'img_estado', 'fusionado_en'],
   CODIGOS: ['codigo', 'producto_id', 'alta'],
   MOVIMIENTOS: ['uuid', 'fecha', 'tipo', 'producto_id', 'lote', 'caducidad', 'cantidad', 'destino', 'factura', 'origen', 'nota', 'anula_uuid', 'recibido'],
   FACTURAS: ['id', 'proveedor', 'numero', 'fecha', 'archivo', 'estado', 'alta'],
   DOTACION: ['gabinete', 'producto_id', 'cantidad', 'dias_revision'],
   CONFIG: ['tipo', 'nombre', 'modo_defecto', 'lote_defecto'],
   STOCK: ['producto_id', 'nombre', 'categoria', 'armario', 'lote', 'caducidad', 'unidades', 'uds_envase', 'minimo_producto', 'total_producto', 'bajo_minimo'],
-  RECHAZADOS: ['recibido', 'uuid', 'motivo', 'datos']
+  RECHAZADOS: ['recibido', 'uuid', 'motivo', 'datos'],
+  CATALOGO: ['proveedor', 'ref', 'descripcion', 'precio', 'fecha', 'factura', 'producto_id', 'alta'],
+  NO_DUPLICADOS: ['producto_a', 'producto_b', 'fecha']
 };
 
 var CONFIG_INICIAL = [
@@ -60,6 +62,8 @@ function onOpen() {
     .addItem('Cambiar la clave de la app', 'cambiarClave')
     .addItem('Recalcular hoja STOCK', 'recalcularStock')
     .addItem('Hacer copia de seguridad ahora', 'copiaSeguridad')
+    .addItem('Cargar catálogo (pestaña CATALOGO_IMPORTAR)', 'cargarCatalogo')
+    .addItem('Buscar imágenes e identificar ahora', 'identificarPendientes')
     .addToUi();
 }
 
@@ -159,21 +163,42 @@ function filas_(nombre) {
   });
 }
 
+/** Como filas_, pero devuelve [] si la pestaña aún no existe (versiones antiguas). */
+function filasOpc_(nombre) {
+  return SpreadsheetApp.getActiveSpreadsheet().getSheetByName(nombre) ? filas_(nombre) : [];
+}
+
 function producto_(o) {
   return {
     id: o.id, nombre: o.nombre, categoria: o.categoria, proveedor: o.proveedor, ref_proveedor: o.ref_proveedor,
     uds_envase: Number(o.uds_envase) || 1, modo: o.modo === 'abrir' ? 'abrir' : 'unidades',
     lote: o.lote === 'SI', armario: o.armario, minimo: Number(o.minimo) || 0,
-    activo: o.activo !== 'NO', notas: o.notas, estado_ia: o.estado_ia || '', con_foto: !!o.foto
+    activo: o.activo !== 'NO' && !o.fusionado_en, notas: o.notas, estado_ia: o.estado_ia || '', con_foto: !!o.foto,
+    fusionado_en: o.fusionado_en || ''
   };
 }
 
+/** Productos combinados: id antiguo → id que se conserva (sigue cadenas). */
+function alias_(prodFilas) {
+  var directo = {}, a = {};
+  prodFilas.forEach(function (p) { if (p.fusionado_en) directo[p.id] = p.fusionado_en; });
+  Object.keys(directo).forEach(function (id) {
+    var x = id, n = 0;
+    while (directo[x] && n++ < 20) x = directo[x];
+    a[id] = x;
+  });
+  return a;
+}
+function real_(alias, pid) { return alias[pid] || pid; }
+
 /** Suma de movimientos por producto|lote. Devuelve {clave: {producto_id, lote, caducidad, unidades}} */
-function calcularStock_(movs) {
+function calcularStock_(movs, alias) {
   var st = {};
+  alias = alias || {};
   movs.forEach(function (m) {
-    var k = m.producto_id + '|' + (m.lote || '');
-    if (!st[k]) st[k] = { producto_id: m.producto_id, lote: m.lote || '', caducidad: '', unidades: 0 };
+    var pid = real_(alias, m.producto_id);
+    var k = pid + '|' + (m.lote || '');
+    if (!st[k]) st[k] = { producto_id: pid, lote: m.lote || '', caducidad: '', unidades: 0 };
     st[k].unidades += Number(m.cantidad) || 0;
     if (m.caducidad && !st[k].caducidad) st[k].caducidad = m.caducidad;
   });
@@ -182,19 +207,22 @@ function calcularStock_(movs) {
 
 function leerEstado_() {
   var movs = filas_('MOVIMIENTOS');
+  var prodFilas = filas_('PRODUCTOS');
+  var alias = alias_(prodFilas);
   var anulados = {};
   movs.forEach(function (m) { if (m.tipo === 'ANULACION' && m.anula_uuid) anulados[m.anula_uuid] = true; });
 
   var stock = [];
-  var st = calcularStock_(movs);
+  var st = calcularStock_(movs, alias);
   Object.keys(st).forEach(function (k) { if (Math.abs(st[k].unidades) > 1e-9) stock.push(st[k]); });
 
   // Reposiciones de gabinete: última salida a cada gabinete por producto.
   var repos = {};
   movs.forEach(function (m) {
     if (m.tipo !== 'SALIDA' || anulados[m.uuid] || String(m.destino).indexOf('Gabinete') !== 0) return;
-    var k = m.destino + '|' + m.producto_id;
-    if (!repos[k] || m.fecha > repos[k].fecha) repos[k] = { gabinete: m.destino, producto_id: m.producto_id, fecha: m.fecha, unidades: -Number(m.cantidad) };
+    var pid = real_(alias, m.producto_id);
+    var k = m.destino + '|' + pid;
+    if (!repos[k] || m.fecha > repos[k].fecha) repos[k] = { gabinete: m.destino, producto_id: pid, fecha: m.fecha, unidades: -Number(m.cantidad) };
   });
 
   var config = { categoria: [], armario: [], destino: [], proveedor: [] };
@@ -204,15 +232,19 @@ function leerEstado_() {
   });
 
   var ultimos = movs.slice(-300).map(function (m) {
-    return { uuid: m.uuid, fecha: m.fecha, tipo: m.tipo, producto_id: m.producto_id, lote: m.lote, caducidad: m.caducidad,
+    return { uuid: m.uuid, fecha: m.fecha, tipo: m.tipo, producto_id: real_(alias, m.producto_id), lote: m.lote, caducidad: m.caducidad,
       cantidad: Number(m.cantidad), destino: m.destino, factura: m.factura, origen: m.origen, nota: m.nota,
       anula_uuid: m.anula_uuid, anulado: !!anulados[m.uuid] };
   });
 
   return {
     ok: true,
-    productos: filas_('PRODUCTOS').map(producto_),
-    codigos: filas_('CODIGOS').map(function (c) { return { codigo: c.codigo, producto_id: c.producto_id }; }),
+    productos: prodFilas.map(producto_),
+    codigos: filas_('CODIGOS').map(function (c) { return { codigo: c.codigo, producto_id: real_(alias, c.producto_id) }; }),
+    catalogo: filasOpc_('CATALOGO').map(function (c) {
+      return { proveedor: c.proveedor, ref: c.ref, descripcion: c.descripcion, precio: Number(c.precio) || 0, fecha: c.fecha, producto_id: real_(alias, c.producto_id) };
+    }),
+    noDuplicados: filasOpc_('NO_DUPLICADOS').map(function (x) { return [x.producto_a, x.producto_b]; }),
     config: config,
     dotacion: filas_('DOTACION').map(function (d) { return { gabinete: d.gabinete, producto_id: d.producto_id, cantidad: Number(d.cantidad) || 0, dias_revision: Number(d.dias_revision) || 0 }; }),
     stock: stock,
@@ -249,12 +281,13 @@ function procesarOps_(ops) {
       uuids[m.uuid] = true; porUuid[m.uuid] = m;
       if (m.tipo === 'ANULACION') anulados[m.anula_uuid] = true;
     });
-    var stock = calcularStock_(movs);
+    var alias = alias_(prodFilas);
+    var stock = calcularStock_(movs, alias);
     var destinos = {};
     filas_('CONFIG').forEach(function (c) { if (c.tipo === 'destino') destinos[c.nombre] = true; });
 
     var nuevosMovs = [], rechazados = [], resultados = [];
-    var cambiosProd = false, hayPendientes = false;
+    var cambiosProd = false, hayPendientes = false, cambiosCodigos = false, noDup = [], fusionesHechas = [];
     asegurarCabeceras_('PRODUCTOS');
 
     ops.forEach(function (op) {
@@ -270,12 +303,18 @@ function procesarOps_(ops) {
             if (nuevas) foto = (nuevas + (foto ? ',' + foto : '')).split(',').slice(0, 3).join(','); // la última primero
             if (op.identificar) { estadoIa = 'pendiente'; intentos = '0'; hayPendientes = true; }
           }
-          var fila = [p.id, p.nombre, p.categoria, p.proveedor, p.ref_proveedor, p.uds_envase, p.modo, p.lote, p.armario, p.minimo, p.activo, p.notas, ahora, foto, estadoIa, intentos];
+          if (prev && prev.fusionado_en) throw new Error('Este producto se combinó con otro: actualiza la app');
+          var obj = {};
+          HOJAS.PRODUCTOS.forEach(function (c) { obj[c] = prev ? prev[c] : ''; });
+          [['id', p.id], ['nombre', p.nombre], ['categoria', p.categoria], ['proveedor', p.proveedor], ['ref_proveedor', p.ref_proveedor],
+            ['uds_envase', p.uds_envase], ['modo', p.modo], ['lote', p.lote], ['armario', p.armario], ['minimo', p.minimo], ['activo', p.activo],
+            ['notas', p.notas], ['actualizado', ahora], ['foto', foto], ['estado_ia', estadoIa], ['intentos_ia', intentos]]
+            .forEach(function (kv) { obj[kv[0]] = String(kv[1]); });
           if (prodIdx[p.id] !== undefined) {
-            prodFilas[prodIdx[p.id]] = filaAObjeto_('PRODUCTOS', fila);
+            prodFilas[prodIdx[p.id]] = obj;
           } else {
             prodIdx[p.id] = prodFilas.length;
-            prodFilas.push(filaAObjeto_('PRODUCTOS', fila));
+            prodFilas.push(obj);
           }
           cambiosProd = true;
           var avisos = [];
@@ -289,16 +328,46 @@ function procesarOps_(ops) {
           return;
         }
 
+        if (op.tipo === 'fusionar') {
+          var de = texto_(op.de, 40), en = texto_(op.en, 40);
+          if (prodIdx[de] === undefined || prodIdx[en] === undefined) throw new Error('Producto desconocido');
+          de = real_(alias, de); en = real_(alias, en);
+          if (de === en) { resultados.push({ op: op.op_id, estado: 'ok' }); return; }
+          var pde = prodFilas[prodIdx[de]], pen = prodFilas[prodIdx[en]];
+          pde.fusionado_en = en; pde.activo = 'NO'; pde.actualizado = ahora;
+          if (!pen.foto && pde.foto) { pen.foto = pde.foto; pen.img_estado = pde.img_estado; }
+          if (!pen.proveedor && pde.proveedor) pen.proveedor = pde.proveedor;
+          if (!pen.ref_proveedor && pde.ref_proveedor) pen.ref_proveedor = pde.ref_proveedor;
+          if ((Number(pen.minimo) || 0) < (Number(pde.minimo) || 0)) pen.minimo = pde.minimo;
+          if (pen.lote !== 'SI' && pde.lote === 'SI') pen.lote = 'SI';
+          if (pen.estado_ia === 'pendiente' || pen.estado_ia === 'revisar') pen.estado_ia = '';
+          pen.actualizado = ahora;
+          alias = alias_(prodFilas);
+          Object.keys(codigos).forEach(function (c) { if (codigos[c] === de) { codigos[c] = en; cambiosCodigos = true; } });
+          stock = calcularStock_(movs, alias);
+          cambiosProd = true;
+          fusionesHechas.push([de, en]);
+          resultados.push({ op: op.op_id, estado: 'ok' });
+          return;
+        }
+
+        if (op.tipo === 'no_duplicado') {
+          noDup.push([texto_(op.a, 40), texto_(op.b, 40), ahora]);
+          resultados.push({ op: op.op_id, estado: 'ok' });
+          return;
+        }
+
         if (op.tipo === 'movimiento') {
           var m = op.movimiento || {};
           if (!m.uuid) throw new Error('Movimiento sin uuid');
           if (uuids[m.uuid]) { resultados.push({ op: op.op_id, uuid: m.uuid, estado: 'duplicado' }); return; }
-          var r = validarMovimiento_(m, prodFilas, prodIdx, stock, destinos, porUuid, anulados);
+          var r = validarMovimiento_(m, prodFilas, prodIdx, stock, destinos, porUuid, anulados, alias);
           var filaM = [m.uuid, String(m.fecha || ahora), r.tipo, r.producto_id, r.lote, r.caducidad, r.cantidad, r.destino,
             String(m.factura || ''), String(m.origen || ''), String(m.nota || '').slice(0, 300), r.anula_uuid, ahora];
           nuevosMovs.push(filaM);
-          var obj = filaAObjeto_('MOVIMIENTOS', filaM);
-          uuids[m.uuid] = true; porUuid[m.uuid] = obj;
+          var objM = filaAObjeto_('MOVIMIENTOS', filaM);
+          movs.push(objM);
+          uuids[m.uuid] = true; porUuid[m.uuid] = objM;
           if (r.tipo === 'ANULACION') anulados[r.anula_uuid] = true;
           var k = r.producto_id + '|' + r.lote;
           if (!stock[k]) stock[k] = { producto_id: r.producto_id, lote: r.lote, caducidad: r.caducidad, unidades: 0 };
@@ -321,9 +390,16 @@ function procesarOps_(ops) {
       var valores = prodFilas.map(function (p) { return cab.map(function (c) { return p[c]; }); });
       hojaProd.getRange(2, 1, valores.length, cab.length).setNumberFormat('@').setValues(valores);
     }
+    if (cambiosCodigos) {
+      var hc = ss.getSheetByName('CODIGOS');
+      var cods = filas_('CODIGOS').map(function (c) { return [c.codigo, codigos[c.codigo] || c.producto_id, c.alta]; });
+      if (cods.length) hc.getRange(2, 1, cods.length, 3).setNumberFormat('@').setValues(cods);
+    }
     anadir_('CODIGOS', nuevosCodigos);
     anadir_('MOVIMIENTOS', nuevosMovs);
     anadir_('RECHAZADOS', rechazados);
+    if (noDup.length) { asegurarHoja_('NO_DUPLICADOS'); anadir_('NO_DUPLICADOS', noDup); }
+    if (fusionesHechas.length) repuntarFusiones_(fusionesHechas);
     if (cambiosProd || nuevosMovs.length) recalcularStock();
     if (hayPendientes) { try { programarIdentificacion_(); } catch (e) { Logger.log('No se pudo programar la identificación: ' + e); } }
 
@@ -333,6 +409,33 @@ function procesarOps_(ops) {
   } finally {
     lock.releaseLock();
   }
+}
+
+function asegurarHoja_(nombre) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var h = ss.getSheetByName(nombre);
+  if (!h) {
+    h = ss.insertSheet(nombre);
+    h.getRange(1, 1, 1, HOJAS[nombre].length).setValues([HOJAS[nombre]]).setFontWeight('bold');
+    h.setFrozenRows(1);
+    h.getRange(1, 1, h.getMaxRows(), HOJAS[nombre].length).setNumberFormat('@');
+  }
+  return h;
+}
+
+/** Tras combinar productos: catálogo y dotación apuntan al que se conserva. */
+function repuntarFusiones_(pares) {
+  var mapa = {};
+  pares.forEach(function (x) { mapa[x[0]] = x[1]; });
+  [['CATALOGO', 'producto_id'], ['DOTACION', 'producto_id']].forEach(function (hc) {
+    var hoja = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(hc[0]);
+    if (!hoja || hoja.getLastRow() < 2) return;
+    var cab = HOJAS[hc[0]], col = cab.indexOf(hc[1]);
+    var r = hoja.getRange(2, col + 1, hoja.getLastRow() - 1, 1);
+    var v = r.getValues(), cambio = false;
+    v.forEach(function (f) { if (mapa[f[0]]) { f[0] = mapa[f[0]]; cambio = true; } });
+    if (cambio) r.setValues(v);
+  });
 }
 
 function filaAObjeto_(nombre, fila) {
@@ -376,7 +479,8 @@ function fechaCad_(v) {
   return v;
 }
 
-function validarMovimiento_(m, prodFilas, prodIdx, stock, destinos, porUuid, anulados) {
+function validarMovimiento_(m, prodFilas, prodIdx, stock, destinos, porUuid, anulados, alias) {
+  alias = alias || {};
   var tipo = texto_(m.tipo, 12);
   if (TIPOS.indexOf(tipo) < 0) throw new Error('Tipo de movimiento no válido');
 
@@ -386,14 +490,15 @@ function validarMovimiento_(m, prodFilas, prodIdx, stock, destinos, porUuid, anu
     if (orig.tipo === 'ANULACION') throw new Error('No se puede anular una anulación');
     if (anulados[orig.uuid]) throw new Error('Ese movimiento ya está anulado');
     var cant = -Number(orig.cantidad);
-    var kk = orig.producto_id + '|' + (orig.lote || '');
+    var kk = real_(alias, orig.producto_id) + '|' + (orig.lote || '');
     var disp = stock[kk] ? stock[kk].unidades : 0;
     if (disp + cant < -1e-9) throw new Error('Anularlo dejaría el stock en negativo');
-    return { tipo: tipo, producto_id: orig.producto_id, lote: orig.lote || '', caducidad: orig.caducidad || '', cantidad: cant, destino: orig.destino || '', anula_uuid: orig.uuid };
+    return { tipo: tipo, producto_id: real_(alias, orig.producto_id), lote: orig.lote || '', caducidad: orig.caducidad || '', cantidad: cant, destino: orig.destino || '', anula_uuid: orig.uuid };
   }
 
   var pid = texto_(m.producto_id, 40);
   if (prodIdx[pid] === undefined) throw new Error('Producto desconocido');
+  pid = real_(alias, pid);
   var prod = producto_(prodFilas[prodIdx[pid]]);
   var lote = texto_(m.lote, 40);
   var caducidad = fechaCad_(m.caducidad);
@@ -423,8 +528,9 @@ function validarMovimiento_(m, prodFilas, prodIdx, stock, destinos, porUuid, anu
 /** Reescribe la hoja STOCK (vista para personas). */
 function recalcularStock() {
   var prods = {};
-  filas_('PRODUCTOS').forEach(function (p) { prods[p.id] = producto_(p); });
-  var st = calcularStock_(filas_('MOVIMIENTOS'));
+  var pf = filas_('PRODUCTOS');
+  pf.forEach(function (p) { prods[p.id] = producto_(p); });
+  var st = calcularStock_(filas_('MOVIMIENTOS'), alias_(pf));
   var totales = {};
   Object.keys(st).forEach(function (k) { totales[st[k].producto_id] = (totales[st[k].producto_id] || 0) + st[k].unidades; });
   var filas = [];
@@ -520,7 +626,10 @@ function guardarFotos_(pid, fotos) {
   var c = carpeta_('CARPETA_FOTOS', 'Inventario Castilla - Fotos');
   var ids = [];
   fotos.filter(function (b) { return typeof b === 'string' && b.length > 100; }).slice(0, 3).forEach(function (b, i) {
-    var blob = Utilities.newBlob(Utilities.base64Decode(b), 'image/jpeg', pid + '-' + (i + 1) + '.jpg');
+    var bytes = Utilities.base64Decode(b);
+    var png = bytes[0] === -119 && bytes[1] === 80, webp = bytes[8] === 87 && bytes[9] === 69;
+    var tipo = png ? 'image/png' : webp ? 'image/webp' : 'image/jpeg';
+    var blob = Utilities.newBlob(bytes, tipo, pid + '-' + (i + 1) + (png ? '.png' : webp ? '.webp' : '.jpg'));
     ids.push(c.createFile(blob).getId());
   });
   return ids.join(',');
@@ -631,6 +740,11 @@ function identificar_(pet) {
 function identificarPendientes() {
   if (!PropertiesService.getScriptProperties().getProperty('GEMINI_KEY')) return;
   asegurarCabeceras_('PRODUCTOS');
+  identificarFotos_();
+  buscarImagenes_(8);
+}
+
+function identificarFotos_() {
   var pendientes = filas_('PRODUCTOS').filter(function (p) { return p.estado_ia === 'pendiente'; }).slice(0, 5);
   if (!pendientes.length) return;
   var codigos = filas_('CODIGOS');
@@ -704,6 +818,185 @@ function leerFoto_(pid) {
   var p = filas_('PRODUCTOS').filter(function (x) { return x.id === String(pid || ''); })[0];
   if (!p || !p.foto) return { ok: true, base64: '' };
   var id = String(p.foto).split(',')[0];
-  try { return { ok: true, base64: Utilities.base64Encode(DriveApp.getFileById(id).getBlob().getBytes()) }; }
+  try { var b = DriveApp.getFileById(id).getBlob(); return { ok: true, base64: Utilities.base64Encode(b.getBytes()), tipo: b.getContentType() || 'image/jpeg' }; }
   catch (e) { return { ok: true, base64: '' }; }
+}
+
+/* ───────────────────────── Catálogo desde facturas ───────────────────────── */
+/*
+ * Se importa el Excel «Catalogo inventario.xlsx» como pestaña nueva llamada CATALOGO_IMPORTAR
+ * (Archivo → Importar → Subir → Insertar hojas nuevas; luego renombrarla) y se ejecuta
+ * Inventario → Cargar catálogo. Columnas: articulo, nombre, categoria, marca, proveedor, ref,
+ * descripcion, precio, fecha, factura. Se puede repetir: no duplica (clave proveedor + referencia).
+ */
+function claveCat_(prov, ref) { return String(prov).trim().toLowerCase() + '|' + String(ref).trim().toUpperCase().replace(/\s+/g, ''); }
+
+function cargarCatalogo() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var imp = ss.getSheetByName('CATALOGO_IMPORTAR');
+  if (!imp) { aviso_('No encuentro la pestaña CATALOGO_IMPORTAR. Importa el Excel del catálogo como hoja nueva y renómbrala así.'); return; }
+  var datos = imp.getDataRange().getValues();
+  var cab = datos.shift().map(function (c) { return String(c).trim().toLowerCase(); });
+  var col = function (n) { return cab.indexOf(n); };
+  ['articulo', 'nombre', 'proveedor', 'ref'].forEach(function (n) { if (col(n) < 0) throw new Error('Falta la columna ' + n + ' en CATALOGO_IMPORTAR'); });
+  var filas = datos.filter(function (r) { return String(r[col('articulo')]).trim() && String(r[col('ref')]).trim(); }).map(function (r) {
+    var o = {};
+    cab.forEach(function (c, i) { o[c] = r[i] instanceof Date ? Utilities.formatDate(r[i], 'Europe/Madrid', 'yyyy-MM-dd') : String(r[i] === null ? '' : r[i]).trim(); });
+    return o;
+  });
+
+  var lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    asegurarCabeceras_('PRODUCTOS');
+    var hCat = asegurarHoja_('CATALOGO');
+    var cat = filas_('CATALOGO');
+    var porClave = {};
+    cat.forEach(function (c, i) { porClave[claveCat_(c.proveedor, c.ref)] = i; });
+    var prods = filas_('PRODUCTOS');
+    var prodIdx = {};
+    prods.forEach(function (p, i) { prodIdx[p.id] = i; });
+    var alias = alias_(prods);
+    var cfgCats = catsConfig_();
+    var ahora = new Date().toISOString();
+
+    // Artículo → producto (si alguna de sus referencias ya estaba enlazada, se reutiliza).
+    var artProd = {};
+    filas.forEach(function (f) {
+      var i = porClave[claveCat_(f.proveedor, f.ref)];
+      if (i !== undefined && cat[i].producto_id) artProd[f.articulo] = real_(alias, cat[i].producto_id);
+    });
+    var nuevosProd = 0, nuevasRefs = 0, actualizadas = 0;
+    var porArticulo = {};
+    filas.forEach(function (f) { (porArticulo[f.articulo] = porArticulo[f.articulo] || []).push(f); });
+    Object.keys(porArticulo).forEach(function (art) {
+      var grupo = porArticulo[art].sort(function (a, b) { return String(b.fecha).localeCompare(String(a.fecha)); });
+      var reciente = grupo[0];
+      var pid = artProd[art];
+      if (!pid) {
+        pid = 'P-C' + Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, art).map(function (b) { return ((b + 256) % 256).toString(16).padStart(2, '0'); }).join('').slice(0, 10).toUpperCase();
+        if (prodIdx[pid] === undefined) {
+          var c = cfgCats.filter(function (x) { return x.nombre === reciente.categoria; })[0];
+          var o = {};
+          HOJAS.PRODUCTOS.forEach(function (k) { o[k] = ''; });
+          o.id = pid; o.nombre = String(reciente.nombre || reciente.descripcion).slice(0, 120); o.categoria = c ? c.nombre : '';
+          o.proveedor = reciente.proveedor; o.ref_proveedor = reciente.ref; o.uds_envase = '1';
+          o.modo = c && c.modo_defecto === 'abrir' ? 'abrir' : 'unidades'; o.lote = c && c.lote_defecto === 'SI' ? 'SI' : 'NO';
+          o.minimo = '0'; o.activo = 'SI'; o.notas = 'Del catálogo de facturas' + (reciente.marca ? ' · marca ' + reciente.marca : '');
+          o.actualizado = ahora;
+          prodIdx[pid] = prods.length; prods.push(o); nuevosProd++;
+        }
+      }
+      grupo.forEach(function (f) {
+        var k = claveCat_(f.proveedor, f.ref);
+        var i = porClave[k];
+        if (i === undefined) {
+          porClave[k] = cat.length;
+          cat.push({ proveedor: f.proveedor, ref: f.ref, descripcion: f.descripcion, precio: f.precio, fecha: f.fecha, factura: f.factura, producto_id: pid, alta: ahora });
+          nuevasRefs++;
+        } else {
+          var e = cat[i];
+          if (String(f.fecha) > String(e.fecha)) { e.precio = f.precio; e.fecha = f.fecha; e.factura = f.factura; e.descripcion = f.descripcion; actualizadas++; }
+          if (!e.producto_id) e.producto_id = pid;
+        }
+      });
+    });
+    var cp = HOJAS.PRODUCTOS;
+    ss.getSheetByName('PRODUCTOS').getRange(2, 1, prods.length, cp.length).setNumberFormat('@').setValues(prods.map(function (p) { return cp.map(function (k) { return p[k]; }); }));
+    var cc = HOJAS.CATALOGO;
+    if (cat.length) hCat.getRange(2, 1, cat.length, cc.length).setNumberFormat('@').setValues(cat.map(function (c) { return cc.map(function (k) { return c[k] === undefined ? '' : String(c[k]); }); }));
+    recalcularStock();
+  } finally {
+    lock.releaseLock();
+  }
+  try { programarIdentificacion_(); } catch (e) { Logger.log(e); }
+  aviso_('Catálogo cargado: ' + nuevosProd + ' productos nuevos, ' + nuevasRefs + ' referencias nuevas, ' + actualizadas + ' precios actualizados. Las imágenes se irán buscando solas en segundo plano.');
+}
+
+/* ───────────────────────── Imágenes de internet ───────────────────────── */
+
+/** Busca imagen para productos sin foto (máx. `n` por vuelta). Se llama desde identificarPendientes. */
+function buscarImagenes_(n) {
+  if (!PropertiesService.getScriptProperties().getProperty('GEMINI_KEY')) return 0;
+  var candidatos = filas_('PRODUCTOS').filter(function (p) {
+    return p.activo !== 'NO' && !p.fusionado_en && !p.foto && p.estado_ia !== 'pendiente' && (p.img_estado === '' || p.img_estado === 'no1') && p.nombre.indexOf('Pendiente') !== 0;
+  }).slice(0, n || 8);
+  if (!candidatos.length) return 0;
+  var res = {};
+  candidatos.forEach(function (p) {
+    var url = '';
+    try { url = buscarUrlImagen_(p); } catch (e) { Logger.log('Imagen ' + p.id + ': ' + e); }
+    var blob = url ? descargarImagen_(url) : null;
+    res[p.id] = blob ? guardarFotos_(p.id, [Utilities.base64Encode(blob.getBytes())]) : '';
+  });
+  var lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    var filas = filas_('PRODUCTOS');
+    filas.forEach(function (p) {
+      if (!(p.id in res) || p.foto) return;
+      if (res[p.id]) { p.foto = res[p.id]; p.img_estado = 'internet'; }
+      else p.img_estado = p.img_estado === 'no1' ? 'no' : 'no1';
+    });
+    var cab = HOJAS.PRODUCTOS;
+    SpreadsheetApp.getActiveSpreadsheet().getSheetByName('PRODUCTOS').getRange(2, 1, filas.length, cab.length)
+      .setNumberFormat('@').setValues(filas.map(function (p) { return cab.map(function (c) { return p[c]; }); }));
+  } finally {
+    lock.releaseLock();
+  }
+  return candidatos.length;
+}
+
+function buscarUrlImagen_(p) {
+  var key = PropertiesService.getScriptProperties().getProperty('GEMINI_KEY');
+  var modelo = PropertiesService.getScriptProperties().getProperty('GEMINI_MODELO') || 'gemini-flash-latest';
+  var prompt = 'Busca en internet una foto del producto dental: "' + p.nombre + '"' +
+    (p.ref_proveedor ? ', referencia ' + p.ref_proveedor : '') + (p.proveedor ? ', vendido por ' + p.proveedor : '') +
+    '. Prefiere la web del fabricante o de un distribuidor dental. Responde SOLO con JSON: ' +
+    '{"imagen": "URL directa de la imagen (.jpg, .png o .webp) o vacío", "pagina": "URL de la página del producto o vacío"}. No inventes URLs.';
+  var modelos = [modelo, 'gemini-flash-latest', 'gemini-flash-lite-latest'].filter(function (m, i, a) { return a.indexOf(m) === i; });
+  for (var i = 0; i < modelos.length; i++) {
+    var r = UrlFetchApp.fetch('https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(modelos[i]) + ':generateContent', {
+      method: 'post', contentType: 'application/json', muteHttpExceptions: true, headers: { 'x-goog-api-key': key },
+      payload: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], tools: [{ google_search: {} }], generationConfig: { temperature: 0.1 } })
+    });
+    if (r.getResponseCode() !== 200) continue;
+    var d = leerJsonGemini_(r.getContentText()) || {};
+    if (d.imagen && /^https?:\/\//.test(d.imagen) && descargarImagen_(d.imagen, true)) return d.imagen;
+    if (d.pagina && /^https?:\/\//.test(d.pagina)) {
+      var og = imagenDePagina_(d.pagina);
+      if (og) return og;
+    }
+    return '';
+  }
+  return '';
+}
+
+/** Lee la imagen principal (og:image) de una página de producto. */
+function imagenDePagina_(url) {
+  try {
+    var r = UrlFetchApp.fetch(url, { muteHttpExceptions: true, followRedirects: true, headers: { 'User-Agent': 'Mozilla/5.0 (inventario clinica)' } });
+    if (r.getResponseCode() !== 200) return '';
+    var html = r.getContentText().slice(0, 300000);
+    var m = html.match(/<meta[^>]+property=["']og:image(?::secure_url)?["'][^>]+content=["']([^"']+)["']/i) ||
+      html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image["']/i);
+    if (!m) return '';
+    var img = m[1].replace(/&amp;/g, '&');
+    if (img.indexOf('//') === 0) img = 'https:' + img;
+    if (img.indexOf('/') === 0) img = url.replace(/^(https?:\/\/[^/]+).*$/, '$1') + img;
+    return descargarImagen_(img, true) ? img : '';
+  } catch (e) { return ''; }
+}
+
+/** Descarga y comprueba que es una imagen razonable (3 KB – 4 MB). */
+function descargarImagen_(url, soloComprobar) {
+  try {
+    var r = UrlFetchApp.fetch(url, { muteHttpExceptions: true, followRedirects: true, headers: { 'User-Agent': 'Mozilla/5.0 (inventario clinica)' } });
+    if (r.getResponseCode() !== 200) return null;
+    var tipo = String(r.getHeaders()['Content-Type'] || r.getHeaders()['content-type'] || '');
+    var b = r.getBlob();
+    var n = b.getBytes().length;
+    if (!/^image\/(jpeg|jpg|png|webp)/i.test(tipo) || n < 3000 || n > 4000000) return null;
+    return soloComprobar ? true : b;
+  } catch (e) { return null; }
 }

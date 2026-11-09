@@ -112,3 +112,75 @@ export function unidadesSalida(prod, cantidadIntroducida) {
 export function normaliza(t) {
   return String(t || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
 }
+
+/* ───────────── Posibles duplicados (como los contactos del móvil) ───────────── */
+const VACIAS = new Set(['de', 'la', 'el', 'los', 'las', 'y', 'con', 'para', 'sin', 'en', 'por', 'a', 'u', 'ud', 'uds', 'un', 'una', 'x', 'c', 'talla', 'del', 'al', 'caja', 'pack', 'envase']);
+
+const TALLAS = new Set(['xs', 's', 'm', 'l', 'xl', 'xxl', 'pequeno', 'mediano', 'grande', 'corta', 'larga', 'fino', 'extrafino', 'grueso', 'blanco', 'blanca', 'amarillo', 'amarilla', 'verde', 'azul', 'rojo', 'roja', 'negro', 'negra', 'rosa', 'gris', 'naranja', 'transparente', 'universal']);
+const esVariante = (t) => /\d/.test(t) || TALLAS.has(t) || /^[a-d][1-4](\.5)?$/.test(t);
+/** Talla, medida, color o número distintos en cada lado → variantes, no duplicados. */
+export function sonVariantes(a, b) {
+  const soloA = [...a].filter((t) => !b.has(t) && esVariante(t));
+  const soloB = [...b].filter((t) => !a.has(t) && esVariante(t));
+  return soloA.length > 0 && soloB.length > 0;
+}
+
+export function fichas(texto) {
+  return new Set(normaliza(texto).replace(/[^a-z0-9.,]+/g, ' ')
+    .replace(/(\d)\s+(l|lt|ml|g|gr|mm|cm|kg|m)\b/g, '$1$2').replace(/(\d)lt\b/g, '$1l').replace(/(\d)gr\b/g, '$1g')
+    .split(' ')
+    .map((t) => t.replace(/^[.,]+|[.,]+$/g, ''))
+    .filter((t) => t && !VACIAS.has(t) && (t.length > 1 || /\d/.test(t) || TALLAS.has(t))));
+}
+
+export function parecido(a, b) {
+  let comun = 0;
+  for (const t of a) if (b.has(t)) comun++;
+  const union = a.size + b.size - comun;
+  return { indice: union ? comun / union : 0, comun };
+}
+
+/**
+ * Parejas de productos activos que podrían ser el mismo. Se descartan las marcadas «no son el mismo».
+ * Devuelve [{a, b, indice, motivo}] ordenado de más a menos parecido.
+ */
+export function posiblesDuplicados(productos, catalogo = [], noDuplicados = [], max = 60) {
+  const activos = productos.filter((p) => p.activo);
+  const descartes = new Set(noDuplicados.map(([x, y]) => [x, y].sort().join('|')));
+  const refs = new Map();
+  for (const c of catalogo) {
+    if (!c.producto_id) continue;
+    if (!refs.has(c.producto_id)) refs.set(c.producto_id, []);
+    refs.get(c.producto_id).push(c.descripcion || '');
+  }
+  const tok = new Map(activos.map((p) => [p.id, fichas([p.nombre, ...(refs.get(p.id) || [])].join(' '))]));
+  const indice = new Map();
+  for (const p of activos) for (const t of tok.get(p.id)) { if (!indice.has(t)) indice.set(t, []); indice.get(t).push(p); }
+  const vistos = new Set(), res = [];
+  const porId = new Map(activos.map((p) => [p.id, p]));
+  for (const p of activos) {
+    const candidatos = new Set();
+    for (const t of tok.get(p.id)) { const l = indice.get(t); if (l && l.length < 80) l.forEach((q) => candidatos.add(q.id)); }
+    for (const qid of candidatos) {
+      if (qid === p.id) continue;
+      const clave = [p.id, qid].sort().join('|');
+      if (vistos.has(clave) || descartes.has(clave)) continue;
+      vistos.add(clave);
+      const q = porId.get(qid);
+      const mismaRef = p.ref_proveedor && q.ref_proveedor && normaliza(p.ref_proveedor).replace(/\s/g, '') === normaliza(q.ref_proveedor).replace(/\s/g, '');
+      const { indice: s, comun } = parecido(tok.get(p.id), tok.get(qid));
+      if (!mismaRef && sonVariantes(tok.get(p.id), tok.get(qid))) continue;
+      if (mismaRef || (s >= 0.5 && comun >= 2)) res.push({ a: p, b: q, indice: mismaRef ? 1 : s, motivo: mismaRef ? 'misma referencia' : 'nombre parecido' });
+    }
+  }
+  return res.sort((x, y) => y.indice - x.indice).slice(0, max);
+}
+
+/** Productos más parecidos a uno dado (para «¿es alguno de estos?»). */
+export function parecidos(producto, productos, n = 3) {
+  const a = fichas(producto.nombre);
+  return productos.filter((p) => p.activo && p.id !== producto.id)
+    .map((p) => ({ p, s: parecido(a, fichas(p.nombre)) }))
+    .filter((x) => x.s.comun >= 2 && x.s.indice >= 0.3 && !sonVariantes(a, fichas(x.p.nombre)))
+    .sort((x, y) => y.s.indice - x.s.indice).slice(0, n).map((x) => x.p);
+}

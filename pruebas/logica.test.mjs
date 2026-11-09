@@ -68,3 +68,24 @@ test('fin de caducidad por mes', () => {
   assert.equal(finCaducidad('2028-02'), '2028-02-29');
   assert.equal(finCaducidad('2028-02-10'), '2028-02-10');
 });
+
+import { posiblesDuplicados, parecidos } from '../js/logica.js';
+test('posibles duplicados: nombre parecido, misma referencia y descartes', () => {
+  const ps = [
+    { id: 'A', nombre: 'Dentasept Tri Enzymatic 5 L', activo: true },
+    { id: 'B', nombre: 'DENTASEPT TRI ENZYMATIC 5L ANIOS', activo: true },
+    { id: 'C', nombre: 'Guantes látex talla S', activo: true, ref_proveedor: 'GD05NB' },
+    { id: 'D', nombre: 'Guantes Santex', activo: true, ref_proveedor: 'gd05nb' },
+    { id: 'E', nombre: 'Guantes látex talla M', activo: true },
+    { id: 'F', nombre: 'Dentasept Tri Enzymatic 5 L', activo: false }
+  ];
+  const r = posiblesDuplicados(ps, [], []);
+  const pares = r.map((x) => [x.a.id, x.b.id].sort().join(''));
+  assert.ok(pares.includes('AB'));
+  assert.ok(pares.includes('CD'));
+  assert.ok(!pares.some((p) => p.includes('F')), 'los inactivos no salen');
+  assert.ok(!pares.includes('CE'), 'tallas distintas no son duplicados');
+  const r2 = posiblesDuplicados(ps, [], [['B', 'A']]);
+  assert.ok(!r2.map((x) => [x.a.id, x.b.id].sort().join('')).includes('AB'));
+  assert.deepEqual(parecidos(ps[0], ps).map((p) => p.id), ['B']);
+});

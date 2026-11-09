@@ -3,12 +3,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
+import { createHash } from 'node:crypto';
 
 function crearEntorno() {
   const hojas = new Map();
   class Hoja {
     constructor(nombre) { this.nombre = nombre; this.d = []; }
     getLastRow() { return this.d.length; }
+    getDataRange() { const h = this; return { getValues: () => h.d.map((f) => [...f]) }; }
     getMaxRows() { return 1000; }
     setFrozenRows() {}
     getRange(fila, col, nf = 1, nc = 1) {
@@ -40,7 +42,9 @@ function crearEntorno() {
     Utilities: {
       getUuid: () => 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', sleep() {},
       base64Decode: (b) => Buffer.from(b, 'base64'), base64Encode: (b) => Buffer.from(b).toString('base64'),
-      newBlob: (bytes, tipo, nombre) => ({ bytes, tipo, nombre })
+      newBlob: (bytes, tipo, nombre) => ({ bytes, tipo, nombre }),
+      computeDigest: (_, txt) => [...createHash('md5').update(txt).digest()].map((b) => (b > 127 ? b - 256 : b)),
+      DigestAlgorithm: { MD5: 'md5' }, formatDate: (d) => d.toISOString().slice(0, 10)
     },
     Logger: { log() {} },
     ScriptApp: {
@@ -51,7 +55,7 @@ function crearEntorno() {
     },
     DriveApp: {
       getFolderById: () => carpeta, createFolder: () => carpeta,
-      getFileById: (id) => ({ getBlob: () => ({ getBytes: () => ficheros.get(id) }) })
+      getFileById: (id) => ({ getBlob: () => ({ getBytes: () => ficheros.get(id), getContentType: () => 'image/jpeg' }) })
     },
     UrlFetchApp: { fetch: (url, opt) => ctx.__fetch(url, opt) },
     ContentService: { createTextOutput: (s) => ({ setMimeType: () => s }), MimeType: { JSON: 'json' } },
@@ -248,4 +252,91 @@ test('foto del producto: añadir otra foto la pone la primera y se puede leer', 
   assert.equal(r.productos[0].estado_ia, '');
   assert.equal(llamar({ accion: 'foto', producto_id: prod.id }).base64, f2);
   assert.equal(llamar({ accion: 'foto', producto_id: 'P-NOEXISTE' }).base64, '');
+});
+
+test('combinar productos: códigos, stock, catálogo y movimientos antiguos van al que se conserva', () => {
+  const { llamar, hojas } = crearEntorno();
+  const a = { id: 'P-AAAA0001', nombre: 'Guantes látex S Santex', uds_envase: 1, modo: 'abrir' };
+  const b = { id: 'P-BBBB0001', nombre: 'Guantes latex talla S', uds_envase: 1, modo: 'abrir', minimo: 10 };
+  llamar({ accion: 'enviar', ops: [
+    { tipo: 'producto', op_id: '1', producto: a, codigos: ['111'] },
+    { tipo: 'producto', op_id: '2', producto: b, codigos: ['222'] },
+    { tipo: 'movimiento', op_id: '3', movimiento: { uuid: 'm1', tipo: 'ENTRADA', producto_id: a.id, cantidad: 3 } },
+    { tipo: 'movimiento', op_id: '4', movimiento: { uuid: 'm2', tipo: 'ENTRADA', producto_id: b.id, cantidad: 5 } }
+  ] });
+  let r = llamar({ accion: 'enviar', ops: [{ tipo: 'fusionar', op_id: 'f', de: b.id, en: a.id }] });
+  assert.equal(r.resultados[0].estado, 'ok');
+  assert.equal(r.stock.length, 1);
+  assert.equal(r.stock[0].producto_id, a.id);
+  assert.equal(r.stock[0].unidades, 8);
+  assert.ok(r.codigos.every((c) => c.producto_id === a.id));
+  const pb = r.productos.find((p) => p.id === b.id);
+  assert.equal(pb.activo, false);
+  assert.equal(pb.fusionado_en, a.id);
+  assert.equal(r.productos.find((p) => p.id === a.id).minimo, 10);
+  // Una salida enviada desde un móvil antiguo con el id viejo se aplica al que se conserva.
+  r = llamar({ accion: 'enviar', ops: [{ tipo: 'movimiento', op_id: '5', movimiento: { uuid: 'm3', tipo: 'SALIDA', producto_id: b.id, cantidad: 6, destino: 'Gabinete 1' } }] });
+  assert.equal(r.resultados[0].estado, 'ok');
+  assert.equal(r.stock[0].unidades, 2);
+  // Anular una entrada antigua del producto combinado.
+  r = llamar({ accion: 'enviar', ops: [{ tipo: 'movimiento', op_id: '6', movimiento: { uuid: 'm4', tipo: 'ANULACION', anula_uuid: 'm1' } }] });
+  assert.equal(r.resultados[0].estado, 'rechazado', 'dejaría stock negativo');
+  r = llamar({ accion: 'enviar', ops: [{ tipo: 'no_duplicado', op_id: '7', a: 'P-X', b: 'P-Y' }] });
+  assert.deepEqual(r.noDuplicados, [['P-X', 'P-Y']]);
+  assert.ok(hojas.has('NO_DUPLICADOS'));
+});
+
+test('cargar catálogo: crea productos por artículo, enlaza referencias y no duplica al repetir', () => {
+  const { ctx, hojas, llamar } = crearEntorno();
+  const imp = hojas.get('PRODUCTOS').constructor ? null : null;
+  const ss = ctx.SpreadsheetApp.getActiveSpreadsheet();
+  const h = ss.insertSheet('CATALOGO_IMPORTAR');
+  h.d = [
+    ['articulo', 'nombre', 'categoria', 'marca', 'proveedor', 'ref', 'descripcion', 'precio', 'fecha', 'factura'],
+    ['A1', 'Dentasept Tri Enzymatic 5 L', 'Limpieza, desinfección e higiene', 'Anios', 'Proclinic', '49889', 'DENTASEPT TRI ENZYMATIC 5L', '45.10', '2026-09-10', '0040570298'],
+    ['A1', 'Dentasept Tri Enzymatic 5 L', 'Limpieza, desinfección e higiene', 'Anios', 'Henry Schein', '900-1234', 'DENTASEPT TRI ENZ 5L ANIOS', '47.00', '2026-03-02', 'M948822'],
+    ['A2', 'Guantes látex S', 'Fungible', '', 'Dentared', 'DTX-GLSP100S', 'Guantes de Látex sin Polvo 100 uds S', '2.80', '2026-01-10', 'DR2026_05177']
+  ];
+  ctx.cargarCatalogo();
+  let r = llamar({ accion: 'estado' });
+  assert.equal(r.productos.length, 2);
+  assert.equal(r.catalogo.length, 3);
+  const dent = r.productos.find((p) => p.nombre.startsWith('Dentasept'));
+  assert.equal(dent.proveedor, 'Proclinic');
+  assert.equal(dent.modo, 'abrir');
+  assert.equal(r.catalogo.filter((c) => c.producto_id === dent.id).length, 2);
+  h.d.push(['A1', 'Dentasept Tri Enzymatic 5 L', '', 'Anios', 'Proclinic', '49889', 'DENTASEPT TRI ENZYMATIC 5L', '46.20', '2026-10-20', '0040638705']);
+  ctx.cargarCatalogo();
+  r = llamar({ accion: 'estado' });
+  assert.equal(r.productos.length, 2);
+  assert.equal(r.catalogo.length, 3);
+  assert.equal(r.catalogo.find((c) => c.ref === '49889').precio, 46.2);
+});
+
+test('imágenes de internet: busca, comprueba que es imagen y la guarda como foto', () => {
+  const { ctx, props, llamar, ficheros } = crearEntorno();
+  props.GEMINI_KEY = 'k';
+  llamar({ accion: 'enviar', ops: [
+    { tipo: 'producto', op_id: '1', producto: { id: 'P-IMG00001', nombre: 'MTA Angelus 1 g', uds_envase: 1, modo: 'unidades' }, codigos: [] },
+    { tipo: 'producto', op_id: '2', producto: { id: 'P-IMG00002', nombre: 'Producto raro', uds_envase: 1, modo: 'unidades' }, codigos: [] }
+  ] });
+  const jpg = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff]), Buffer.alloc(5000, 1)]);
+  ctx.__fetch = (url, opt) => {
+    if (url.includes('generativelanguage')) {
+      const raro = JSON.parse(opt.payload).contents[0].parts[0].text.includes('Producto raro');
+      const t = raro ? '{"imagen":"https://x.com/falsa.jpg","pagina":""}' : '{"imagen":"https://angelus.com/mta.jpg","pagina":""}';
+      return { getResponseCode: () => 200, getContentText: () => JSON.stringify({ candidates: [{ content: { parts: [{ text: t }] } }] }) };
+    }
+    if (url === 'https://angelus.com/mta.jpg') return { getResponseCode: () => 200, getHeaders: () => ({ 'Content-Type': 'image/jpeg' }), getBlob: () => ({ getBytes: () => [...jpg].map((b) => (b > 127 ? b - 256 : b)) }) };
+    return { getResponseCode: () => 404, getHeaders: () => ({}), getBlob: () => ({ getBytes: () => [] }) };
+  };
+  ctx.identificarPendientes();
+  let r = llamar({ accion: 'estado' });
+  assert.equal(r.productos.find((p) => p.id === 'P-IMG00001').con_foto, true);
+  assert.equal(r.productos.find((p) => p.id === 'P-IMG00002').con_foto, false);
+  assert.ok(ficheros.size >= 1);
+  ctx.identificarPendientes(); // segundo intento fallido → ya no se busca más
+  ctx.identificarPendientes();
+  const fila = ctx.filas_('PRODUCTOS').find((p) => p.id === 'P-IMG00002');
+  assert.equal(fila.img_estado, 'no');
 });
