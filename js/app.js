@@ -5,7 +5,7 @@ import {
   unidadesSalida, normaliza, diasEntre, finCaducidad
 } from './logica.js';
 
-const VERSION_APP = '1.0.0';
+const VERSION_APP = '1.1.0';
 const $ = (s) => document.querySelector(s);
 const vista = $('#vista');
 
@@ -185,7 +185,7 @@ async function abrirEscaner(callback, msg = 'Apunta al código de la caja') {
         ultimo = t;
         try {
           const res = await detector.detect(v);
-          if (res.length) { const r = res[0]; cerrarEscaner(); navigator.vibrate?.(80); alLeer?.(r.rawValue, r.format); return; }
+          if (res.length) { const r = res[0]; const foto = fotograma(v); cerrarEscaner(); navigator.vibrate?.(80); alLeer?.(r.rawValue, r.format, foto); return; }
         } catch { /* fotograma no disponible */ }
       }
       bucle = requestAnimationFrame(paso);
@@ -195,6 +195,26 @@ async function abrirEscaner(callback, msg = 'Apunta al código de la caja') {
     $('#escanerMsg').textContent = 'No se pudo abrir la cámara (' + e.message + '). Puedes teclear el código.';
   }
 }
+/** JPEG en base64 (sin cabecera) de un vídeo, imagen o fichero, reducido a `max` px. */
+function fotograma(fuente, max = 1280) {
+  try {
+    const w = fuente.videoWidth || fuente.naturalWidth || fuente.width, hh = fuente.videoHeight || fuente.naturalHeight || fuente.height;
+    if (!w || !hh) return '';
+    const k = Math.min(1, max / Math.max(w, hh));
+    const c = document.createElement('canvas'); c.width = Math.round(w * k); c.height = Math.round(hh * k);
+    c.getContext('2d').drawImage(fuente, 0, 0, c.width, c.height);
+    return c.toDataURL('image/jpeg', 0.82).split(',')[1];
+  } catch { return ''; }
+}
+function fotoDeFichero(file) {
+  return new Promise((ok) => {
+    const img = new Image();
+    img.onload = () => { ok(fotograma(img)); URL.revokeObjectURL(img.src); };
+    img.onerror = () => ok('');
+    img.src = URL.createObjectURL(file);
+  });
+}
+
 function cerrarEscaner() {
   cancelAnimationFrame(bucle);
   if (flujo) flujo.getTracks().forEach((t) => t.stop());
@@ -216,11 +236,11 @@ $('#escanerBuscar').addEventListener('click', () => { cerrarEscaner(); buscarDes
 /** Escanear para encontrar un producto y abrir la vista indicada (ver / entrada / salida). */
 function escanearPara(intencion) {
   buscarDesdeEscaner = () => ir('stock', { elegir: intencion });
-  abrirEscaner((raw, formato) => {
+  abrirEscaner((raw, formato, foto) => {
     const lec = leerCodigo(raw, formato);
     const pid = codigos().get(lec.clave);
     if (pid && prods().has(pid)) abrirProducto(pid, intencion, lec);
-    else ir('codigoNuevo', { lec, intencion });
+    else ir('codigoNuevo', { lec, intencion, fotos: foto ? [foto] : [] });
   });
 }
 
@@ -371,48 +391,97 @@ VISTAS.producto = ({ pid, lec }) => {
   });
 };
 
-VISTAS.codigoNuevo = ({ lec, intencion }) => {
-  titulo('Código nuevo');
+VISTAS.codigoNuevo = (p) => {
+  const { lec, intencion } = p;
+  p.fotos = p.fotos || [];
+  titulo('Producto nuevo');
+  const prop = p.propuesta;
   vista.innerHTML = `
     <section class="tarjeta">
-      <h2>Este código aún no está en el catálogo</h2>
+      <h2>Código nuevo</h2>
       <span class="peq">${h(lec.clave)}${lec.lote ? ' · lote ' + h(lec.lote) : ''}${lec.caducidad ? ' · cad. ' + cad(lec.caducidad) : ''}</span>
     </section>
-    <button class="btn grande" id="crear">Crear producto nuevo</button>
-    <h2>…o es un producto que ya existe</h2>
-    <label>Buscar<input type="search" id="buscar" placeholder="Nombre o referencia" autocomplete="off"></label>
-    <div class="lista" id="res"></div>`;
-  $('#crear').onclick = () => ir('ficha', { codigo: lec.clave, lec, intencion }, true);
-  const pintarLista = (q) => {
-    q = normaliza(q);
-    const l = datos.productos.filter((p) => p.activo && (!q || normaliza(p.nombre + ' ' + p.ref_proveedor).includes(q))).slice(0, 30);
-    $('#res').innerHTML = l.map((p) => `<button class="tarjeta item" data-pid="${h(p.id)}"><span class="fuerte">${h(p.nombre)}</span><span class="peq">${h(p.ref_proveedor || p.categoria)}</span></button>`).join('');
-    $('#res').querySelectorAll('[data-pid]').forEach((b) => {
-      b.onclick = () => {
-        const p = prods().get(b.dataset.pid);
-        if (!confirm(`¿Añadir este código a «${p.nombre}»?`)) return;
-        encolar({ tipo: 'producto', producto: { ...p }, codigos: [lec.clave] });
-        datos.codigos.push({ codigo: lec.clave, producto_id: p.id });
-        guardar('datos', datos);
-        aviso('Código enlazado');
-        abrirProducto(p.id, intencion, lec, true);
-      };
-    });
+    <section class="tarjeta" id="ia">
+      ${p.cargando ? '<h2>Identificando el producto…</h2><span class="peq">Leyendo la foto de la caja.</span>'
+        : prop ? `<span class="peq">Propuesta a partir de la foto</span><h2>${h(prop.nombre || '¿?')}</h2>
+          <span class="peq">${h([prop.marca, prop.ref_proveedor && 'REF ' + prop.ref_proveedor, prop.uds_envase > 1 && prop.uds_envase + ' ud./envase', prop.categoria].filter(Boolean).join(' · '))}</span>
+          ${prop.dudas ? `<span class="nota">${h(prop.dudas)}</span>` : ''}`
+        : p.error ? `<h2>No se ha podido identificar</h2><span class="peq">${h(p.error)}</span>`
+        : '<h2>Haz una foto de la cara con el nombre</h2><span class="peq">La app lee el nombre, la marca, la referencia y las unidades.</span>'}
+    </section>
+    ${prop ? '<button class="btn grande" id="usar">Usar estos datos</button>' : ''}
+    <label class="btn ${prop ? 'claro' : 'grande'}" style="display:flex;align-items:center;justify-content:center;flex-direction:row;color:${prop ? 'var(--verde)' : 'var(--beige)'}">
+      ${p.fotos.length ? 'Añadir foto de la parte delantera' : 'Hacer foto de la caja'}
+      <input type="file" accept="image/*" capture="environment" id="foto" class="oculto">
+    </label>
+    <div class="fila"><button class="btn claro" id="aMano" style="flex:1">Escribir a mano</button><button class="btn claro" id="existe" style="flex:1">Ya existe en la lista</button></div>
+    <div class="lista" id="res" hidden></div>`;
+  const identificar = async () => {
+    p.cargando = true; p.error = ''; pintar();
+    try {
+      const j = await api('identificar', { imagenes: p.fotos.slice(-3), lectura: { gtin: lec.gtin, lote: lec.lote, caducidad: lec.caducidad, bruto: lec.clave } });
+      p.propuesta = j.propuesta;
+    } catch (e) { p.error = e.message; }
+    p.cargando = false;
+    if (pila[pila.length - 1].params === p) pintar();
   };
-  $('#buscar').oninput = (e) => pintarLista(e.target.value);
-  pintarLista('');
+  if (p.fotos.length && !prop && !p.cargando && !p.error && !p.intentado && cfg.url) { p.intentado = true; identificar(); return; }
+  $('#foto').onchange = async (e) => {
+    const f = e.target.files && e.target.files[0];
+    if (!f) return;
+    const b64 = await fotoDeFichero(f);
+    if (!b64) { aviso('No se pudo leer la foto'); return; }
+    p.fotos.push(b64); p.propuesta = null; identificar();
+  };
+  if ($('#usar')) $('#usar').onclick = () => ir('ficha', { codigo: lec.clave, lec, intencion, propuesta: prop }, true);
+  $('#aMano').onclick = () => ir('ficha', { codigo: lec.clave, lec, intencion }, true);
+  $('#existe').onclick = () => {
+    const res = $('#res'); res.hidden = false;
+    res.innerHTML = '<label>Buscar<input type="search" id="buscar" placeholder="Nombre o referencia" autocomplete="off"></label><div class="lista" id="res2"></div>';
+    const pintarLista = (q) => {
+      q = normaliza(q);
+      const l = datos.productos.filter((x) => x.activo && (!q || normaliza(x.nombre + ' ' + x.ref_proveedor).includes(q))).slice(0, 30);
+      $('#res2').innerHTML = l.map((x) => `<button class="tarjeta item" data-pid="${h(x.id)}"><span class="fuerte">${h(x.nombre)}</span><span class="peq">${h(x.ref_proveedor || x.categoria)}</span></button>`).join('');
+      $('#res2').querySelectorAll('[data-pid]').forEach((b) => {
+        b.onclick = () => {
+          const pr = prods().get(b.dataset.pid);
+          if (!confirm(`¿Añadir este código a «${pr.nombre}»?`)) return;
+          encolar({ tipo: 'producto', producto: { ...pr }, codigos: [lec.clave] });
+          datos.codigos.push({ codigo: lec.clave, producto_id: pr.id });
+          guardar('datos', datos);
+          aviso('Código enlazado');
+          abrirProducto(pr.id, intencion, lec, true);
+        };
+      });
+    };
+    $('#buscar').oninput = (e) => pintarLista(e.target.value);
+    pintarLista('');
+    $('#buscar').focus();
+  };
 };
 
-VISTAS.ficha = ({ pid, codigo, lec, intencion }) => {
+VISTAS.ficha = ({ pid, codigo, lec, intencion, propuesta }) => {
   const existente = pid ? prods().get(pid) : null;
   titulo(existente ? 'Editar ficha' : 'Nuevo producto');
   const cats = datos.config.categoria || [];
   const arms = (datos.config.armario || []).map((a) => a.nombre);
   const provs = [...new Set(datos.productos.map((p) => p.proveedor).filter(Boolean).concat((datos.config.proveedor || []).map((p) => p.nombre)))];
-  const p = existente || { nombre: '', categoria: '', proveedor: '', ref_proveedor: '', uds_envase: 1, modo: 'unidades', lote: false, armario: '', minimo: 0, notas: '', activo: true };
+  const p = existente || { nombre: '', categoria: '', proveedor: '', ref_proveedor: '', uds_envase: 1, modo: 'unidades', lote: false, armario: leer('ultimoArmario', ''), minimo: 0, notas: '', activo: true };
+  if (!existente && propuesta) {
+    const c = cats.find((x) => x.nombre === propuesta.categoria);
+    p.nombre = propuesta.nombre || '';
+    p.categoria = c ? c.nombre : '';
+    p.proveedor = propuesta.marca || '';
+    p.ref_proveedor = propuesta.ref_proveedor || '';
+    if (c) { p.modo = c.modo_defecto === 'abrir' ? 'abrir' : 'unidades'; p.lote = c.lote_defecto === 'SI'; }
+    if (lec && (lec.lote || lec.caducidad)) p.lote = true;
+    const uds = Math.max(1, parseInt(propuesta.uds_envase, 10) || 1);
+    if (p.modo === 'abrir') { p.uds_envase = 1; if (uds > 1) p.notas = `Envase de ${uds} u.`; } else p.uds_envase = uds;
+  }
   const cods = existente ? datos.codigos.filter((c) => c.producto_id === pid).map((c) => c.codigo) : [];
   const nuevos = codigo ? [codigo] : [];
   vista.innerHTML = `
+    ${propuesta ? '<p class="nota info">Datos leídos de la foto: revísalos, elige el armario y guarda.</p>' : ''}
     <form class="campos" id="f">
       <label>Nombre *<input name="nombre" required maxlength="120" value="${h(p.nombre)}" placeholder="Ej.: Guantes látex Santex talla S"></label>
       <label>Categoría<select name="categoria"><option value=""></option>${cats.map((c) => `<option ${c.nombre === p.categoria ? 'selected' : ''}>${h(c.nombre)}</option>`).join('')}</select></label>
@@ -463,6 +532,7 @@ VISTAS.ficha = ({ pid, codigo, lec, intencion }) => {
       notas: String(fd.get('notas') || '').trim(), activo: existente ? !!fd.get('activo') : true
     };
     if (!prod.nombre) { aviso('Falta el nombre'); return; }
+    if (prod.armario) guardar('ultimoArmario', prod.armario);
     encolar({ tipo: 'producto', producto: prod, codigos: nuevos });
     // Copia local inmediata (funciona sin conexión).
     const i = datos.productos.findIndex((x) => x.id === prod.id);

@@ -25,6 +25,14 @@ No hay datos de pacientes en la app. Este repositorio es público: no contiene d
 5. Vuelve a la hoja y recárgala: aparece el menú **Inventario**. En **Inventario → Ver la clave de la app**
    tienes la clave.
 
+### 1 bis. Identificar productos por foto (Gemini)
+Para que al escanear un código nuevo la app lea el nombre de la caja sin escribirlo:
+1. Con la cuenta de Google de la clínica entra en **https://aistudio.google.com/apikey** y pulsa
+   **Create API key**. Copia la clave.
+2. En Apps Script: **Configuración del proyecto → Propiedades del script → Añadir propiedad**:
+   nombre `GEMINI_KEY`, valor la clave. Guarda.
+3. (Opcional) `GEMINI_MODELO` para usar otro modelo; por defecto `gemini-flash-latest`.
+
 ### 2. Publicar el servidor
 1. En Apps Script: **Implementar → Nueva implementación → tipo: Aplicación web**.
 2. *Ejecutar como*: **Yo**. *Quién tiene acceso*: **Cualquier usuario**. Pulsa **Implementar**.
@@ -43,7 +51,8 @@ No hay datos de pacientes en la app. Este repositorio es público: no contiene d
 4. La primera vez que escanees, permite el uso de la cámara.
 
 ## Uso diario
-- **Escanear** una caja abre su ficha (o pide darla de alta si el código es nuevo).
+- **Escanear** una caja abre su ficha. Si el código es nuevo, la app manda la foto de la caja a Gemini y
+  propone nombre, marca, referencia, unidades y categoría: solo hay que elegir el armario y guardar.
 - **Entrada**: envases recibidos, lote y caducidad (se leen del DataMatrix), nº de factura o «pendiente».
 - **Salida**: cantidad y destino. *Consumido al abrir* descuenta el envase entero; *por unidades* descuenta
   las que se usan. Lo que va a un gabinete sale del stock para el pedido y queda anotado en el gabinete.

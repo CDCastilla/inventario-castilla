@@ -37,6 +37,7 @@ function crearEntorno() {
     Utilities: { getUuid: () => 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' },
     Logger: { log() {} },
     ScriptApp: { getProjectTriggers: () => [], newTrigger: () => { const t = { timeBased: () => t, onWeekDay: () => t, atHour: () => t, inTimezone: () => t, create: () => t }; return t; }, WeekDay: { MONDAY: 1 } },
+    UrlFetchApp: { fetch: (url, opt) => ctx.__fetch(url, opt) },
     ContentService: { createTextOutput: (s) => ({ setMimeType: () => s }), MimeType: { JSON: 'json' } },
     console
   };
@@ -124,4 +125,29 @@ test('flujo completo: alta, entrada, salida a gabinete, duplicado, rechazos, anu
   // Hoja STOCK para personas.
   const filasStock = hojas.get('STOCK').d.slice(1);
   assert.ok(filasStock.some((f) => f[0] === guantes.id && f[10] === 'SÍ'));
+});
+
+test('identificar: pide a Gemini y devuelve una propuesta saneada', () => {
+  const { llamar, props, ctx } = crearEntorno();
+  let r = llamar({ accion: 'identificar', imagenes: ['x'.repeat(200)] });
+  assert.equal(r.ok, false);
+  assert.match(r.error, /GEMINI_KEY/);
+  props.GEMINI_KEY = 'k';
+  let peticion;
+  ctx.__fetch = (url, opt) => {
+    peticion = { url, cuerpo: JSON.parse(opt.payload), clave: opt.headers['x-goog-api-key'] };
+    const texto = JSON.stringify({ nombre: 'Guantes látex Santex talla S', marca: 'Santex', ref_proveedor: 'GD05NB', uds_envase: 100, categoria: 'Fungible', lote: '', caducidad: '2031-04', dudas: '' });
+    return { getResponseCode: () => 200, getContentText: () => JSON.stringify({ candidates: [{ content: { parts: [{ text: texto }] } }] }) };
+  };
+  r = llamar({ accion: 'identificar', imagenes: ['x'.repeat(200)], lectura: { gtin: '08437014559484' } });
+  assert.ok(r.ok, r.error);
+  assert.equal(peticion.clave, 'k');
+  assert.match(peticion.url, /gemini-flash-latest:generateContent$/);
+  assert.match(peticion.cuerpo.contents[0].parts[0].text, /08437014559484/);
+  assert.equal(peticion.cuerpo.contents[0].parts[1].inline_data.mime_type, 'image/jpeg');
+  assert.deepEqual(r.propuesta, { nombre: 'Guantes látex Santex talla S', marca: 'Santex', ref_proveedor: 'GD05NB', uds_envase: 100, categoria: 'Fungible', lote: '', caducidad: '2031-04', dudas: '' });
+  ctx.__fetch = () => ({ getResponseCode: () => 200, getContentText: () => JSON.stringify({ candidates: [{ content: { parts: [{ text: '{"nombre":"X","categoria":"Inventada","uds_envase":"abc"}' }] } }] }) });
+  r = llamar({ accion: 'identificar', imagenes: ['x'.repeat(200)] });
+  assert.equal(r.propuesta.categoria, '');
+  assert.equal(r.propuesta.uds_envase, 1);
 });

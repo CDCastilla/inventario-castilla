@@ -13,7 +13,7 @@
  *  - Editar la ficha de un producto nunca mueve stock.
  */
 
-var VERSION_SERVIDOR = '1.0.1';
+var VERSION_SERVIDOR = '1.1.0';
 
 var HOJAS = {
   PRODUCTOS: ['id', 'nombre', 'categoria', 'proveedor', 'ref_proveedor', 'uds_envase', 'modo', 'lote', 'armario', 'minimo', 'activo', 'notas', 'actualizado'],
@@ -127,6 +127,7 @@ function doPost(e) {
     if (pet.accion === 'estado') return json_(conVersion_(leerEstado_()));
     if (pet.accion === 'enviar') return json_(conVersion_(procesarOps_(pet.ops || [])));
     if (pet.accion === 'exportar') return json_(conVersion_(exportarXlsx_()));
+    if (pet.accion === 'identificar') return json_(conVersion_(identificar_(pet)));
     return json_({ ok: false, error: 'Acción desconocida' });
   } catch (err) {
     return json_({ ok: false, error: String(err && err.message || err) });
@@ -470,4 +471,57 @@ function instalarCopiaSemanal() {
 function exportarXlsx_() {
   var blob = xlsxBlob_();
   return { ok: true, nombre: blob.getName(), base64: Utilities.base64Encode(blob.getBytes()) };
+}
+
+/* ───────────────────────── Identificar un producto por foto (Gemini) ───────────────────────── */
+
+/**
+ * Necesita la propiedad del script GEMINI_KEY (clave de Google AI Studio).
+ * Opcional: GEMINI_MODELO (por defecto gemini-flash-latest).
+ */
+function identificar_(pet) {
+  var props = PropertiesService.getScriptProperties();
+  var key = props.getProperty('GEMINI_KEY');
+  if (!key) throw new Error('Falta la clave de Gemini: Apps Script → Configuración del proyecto → Propiedades del script → GEMINI_KEY');
+  var modelo = props.getProperty('GEMINI_MODELO') || 'gemini-flash-latest';
+  var imagenes = (pet.imagenes || []).filter(function (b) { return typeof b === 'string' && b.length > 100; }).slice(-3);
+  if (!imagenes.length) throw new Error('No ha llegado ninguna foto');
+  var cats = filas_('CONFIG').filter(function (c) { return c.tipo === 'categoria'; }).map(function (c) { return c.nombre; });
+  var lec = pet.lectura || {};
+  var prompt = [
+    'Eres el asistente de inventario de una clínica dental en España. Las fotos son de un envase de producto (material dental, medicamento, fungible o limpieza).',
+    'Datos ya leídos del código de barras: GTIN ' + (lec.gtin || '—') + ', lote ' + (lec.lote || '—') + ', caducidad ' + (lec.caducidad || '—') + '.',
+    'Devuelve SOLO un objeto JSON con estas claves:',
+    '- nombre: en español, corto (máx. 60 caracteres), como lo llamaría la clínica: tipo de producto + marca + modelo, medida, talla, color o concentración. Ejemplos: "Guantes látex Santex talla S", "Implante Klockner Essential Cone 4.0×10", "Meganest 40 mg/ml 1:100.000", "Dentasept Tri Enzymatic 5 L".',
+    '- marca: marca o fabricante.',
+    '- ref_proveedor: la referencia del fabricante (texto tras REF o Ref.), o "" si no aparece.',
+    '- uds_envase: número entero de unidades que contiene el envase (p. ej. 100 guantes, 50 carpules, 7 aplicaciones = 1 envase de 1 g → pon 1 si no hay unidades separables). 1 si no consta.',
+    '- categoria: exactamente una de: ' + cats.join(' | ') + '.',
+    '- lote y caducidad: solo si se leen en la foto y no venían en el código (caducidad como AAAA-MM o AAAA-MM-DD), si no "".',
+    '- dudas: frase corta si algo no se lee bien en la foto; "" si todo está claro.',
+    'No inventes datos que no se vean.'
+  ].join('\n');
+  var partes = [{ text: prompt }].concat(imagenes.map(function (b) { return { inline_data: { mime_type: 'image/jpeg', data: b } }; }));
+  var resp = UrlFetchApp.fetch('https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(modelo) + ':generateContent', {
+    method: 'post', contentType: 'application/json', muteHttpExceptions: true,
+    headers: { 'x-goog-api-key': key },
+    payload: JSON.stringify({ contents: [{ parts: partes }], generationConfig: { responseMimeType: 'application/json', temperature: 0.1 } })
+  });
+  var code = resp.getResponseCode();
+  if (code !== 200) throw new Error('Gemini respondió ' + code + ': ' + resp.getContentText().slice(0, 300));
+  var j = JSON.parse(resp.getContentText());
+  var txt = ((j.candidates && j.candidates[0] && j.candidates[0].content && j.candidates[0].content.parts) || [])
+    .map(function (p) { return p.text || ''; }).join('').replace(/^```(json)?|```$/g, '').trim();
+  var d;
+  try { d = JSON.parse(txt); } catch (e) { throw new Error('Respuesta de Gemini no válida'); }
+  var cat = cats.indexOf(String(d.categoria || '')) >= 0 ? String(d.categoria) : '';
+  var cad = String(d.caducidad || '');
+  return {
+    ok: true,
+    propuesta: {
+      nombre: texto_(d.nombre, 120), marca: texto_(d.marca, 80), ref_proveedor: texto_(d.ref_proveedor, 60),
+      uds_envase: Math.max(1, Math.floor(Number(d.uds_envase) || 1)), categoria: cat,
+      lote: texto_(d.lote, 40), caducidad: /^\d{4}-\d{2}(-\d{2})?$/.test(cad) ? cad : '', dudas: texto_(d.dudas, 200)
+    }
+  };
 }
