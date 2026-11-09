@@ -81,11 +81,17 @@ function titulo(t) { $('#titulo').textContent = t; document.title = t + ' · Inv
 /* ───────────── Sincronización ───────────── */
 async function api(accion, extra = {}) {
   if (!cfg.url || !cfg.clave) throw new Error('Falta configurar la URL y la clave en Ajustes');
-  const r = await fetch(cfg.url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-    body: JSON.stringify({ clave: cfg.clave, accion, ...extra })
-  });
+  if (!/^https:\/\/script\.google\.com\/macros\/s\/[^/]+\/exec$/.test(cfg.url)) throw new Error('La URL debe empezar por https://script.google.com/macros/s/ y terminar en /exec');
+  let r;
+  try {
+    r = await fetch(cfg.url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ clave: cfg.clave, accion, ...extra })
+    });
+  } catch {
+    throw new Error(navigator.onLine ? 'No se puede conectar con el servidor: revisa que la implementación tenga acceso «Cualquier usuario»' : 'Sin conexión a internet');
+  }
   if (!r.ok) throw new Error('El servidor respondió ' + r.status);
   const j = await r.json();
   if (!j.ok) throw new Error(j.error || 'Error del servidor');
