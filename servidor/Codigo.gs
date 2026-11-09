@@ -13,7 +13,7 @@
  *  - Editar la ficha de un producto nunca mueve stock.
  */
 
-var VERSION_SERVIDOR = '1.2.0';
+var VERSION_SERVIDOR = '1.3.0';
 
 var HOJAS = {
   PRODUCTOS: ['id', 'nombre', 'categoria', 'proveedor', 'ref_proveedor', 'uds_envase', 'modo', 'lote', 'armario', 'minimo', 'activo', 'notas', 'actualizado', 'foto', 'estado_ia', 'intentos_ia'],
@@ -131,6 +131,7 @@ function doPost(e) {
     if (pet.accion === 'enviar') return json_(conVersion_(procesarOps_(pet.ops || [])));
     if (pet.accion === 'exportar') return json_(conVersion_(exportarXlsx_()));
     if (pet.accion === 'identificar') return json_(conVersion_(identificar_(pet)));
+    if (pet.accion === 'foto') return json_(conVersion_(leerFoto_(pet.producto_id)));
     return json_({ ok: false, error: 'Acción desconocida' });
   } catch (err) {
     return json_({ ok: false, error: String(err && err.message || err) });
@@ -265,7 +266,8 @@ function procesarOps_(ops) {
           var estadoIa = op.producto.estado_ia !== undefined ? String(op.producto.estado_ia) : (prev ? prev.estado_ia : '');
           if (['', 'pendiente', 'revisar', 'error'].indexOf(estadoIa) < 0) estadoIa = '';
           if (Array.isArray(op.fotos) && op.fotos.length) {
-            foto = guardarFotos_(p.id, op.fotos) || foto;
+            var nuevas = guardarFotos_(p.id, op.fotos);
+            if (nuevas) foto = (nuevas + (foto ? ',' + foto : '')).split(',').slice(0, 3).join(','); // la última primero
             if (op.identificar) { estadoIa = 'pendiente'; intentos = '0'; hayPendientes = true; }
           }
           var fila = [p.id, p.nombre, p.categoria, p.proveedor, p.ref_proveedor, p.uds_envase, p.modo, p.lote, p.armario, p.minimo, p.activo, p.notas, ahora, foto, estadoIa, intentos];
@@ -695,4 +697,13 @@ function aplicarPropuesta_(p, d, cfgCats, tieneMovimientos) {
   if (d.fuente) notas.push('identificado por IA (' + d.fuente + ')');
   if (d.dudas) notas.push(d.dudas);
   if (notas.length) p.notas = ((p.notas ? p.notas + ' · ' : '') + notas.join(' · ')).slice(0, 500);
+}
+
+/** Devuelve la foto principal de un producto (la más reciente) en base64. */
+function leerFoto_(pid) {
+  var p = filas_('PRODUCTOS').filter(function (x) { return x.id === String(pid || ''); })[0];
+  if (!p || !p.foto) return { ok: true, base64: '' };
+  var id = String(p.foto).split(',')[0];
+  try { return { ok: true, base64: Utilities.base64Encode(DriveApp.getFileById(id).getBlob().getBytes()) }; }
+  catch (e) { return { ok: true, base64: '' }; }
 }

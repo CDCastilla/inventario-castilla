@@ -5,7 +5,7 @@ import {
   unidadesSalida, normaliza, diasEntre, finCaducidad
 } from './logica.js';
 
-const VERSION_APP = '1.2.0';
+const VERSION_APP = '1.3.0';
 const $ = (s) => document.querySelector(s);
 const vista = $('#vista');
 
@@ -170,6 +170,22 @@ function encolar(op) {
   cola.push(op);
   guardar('cola', cola);
   sincronizar();
+}
+
+/* ───────────── Fotos de producto (caché del navegador) ───────────── */
+const CACHE_FOTOS = 'fotos-productos';
+async function fotoLocal(pid) {
+  try { const r = await (await caches.open(CACHE_FOTOS)).match('foto/' + pid); return r ? await r.text() : ''; } catch { return ''; }
+}
+async function guardarFotoLocal(pid, b64) {
+  try { await (await caches.open(CACHE_FOTOS)).put('foto/' + pid, new Response(b64)); } catch { /* sin caché */ }
+}
+async function fotoProducto(pid) {
+  let b64 = await fotoLocal(pid);
+  if (b64) return b64;
+  try { b64 = (await api('foto', { producto_id: pid })).base64 || ''; } catch { return ''; }
+  if (b64) await guardarFotoLocal(pid, b64);
+  return b64;
 }
 
 /* ───────────── Escáner ───────────── */
@@ -379,6 +395,7 @@ VISTAS.producto = ({ pid, lec }) => {
   vista.innerHTML = `
     ${ia}
     ${lec ? `<p class="nota info">Escaneado${lec.lote ? ' · lote ' + h(lec.lote) : ''}${lec.caducidad ? ' · cad. ' + cad(lec.caducidad) : ''}</p>` : ''}
+    <figure id="fotoProd" class="foto" hidden><img alt="${h(pr.nombre)}"></figure>
     <section class="tarjeta">
       <span class="entre"><h2>${h(pr.nombre)}</h2><span class="cifra">${h(formatoCantidad(t, pr))}</span></span>
       <span class="peq">${h([pr.categoria, pr.armario, pr.proveedor, pr.ref_proveedor && 'REF ' + pr.ref_proveedor].filter(Boolean).join(' · '))}</span>
@@ -397,6 +414,10 @@ VISTAS.producto = ({ pid, lec }) => {
       <button class="btn claro" id="bAjuste">Ajustar stock</button>
       <button class="btn claro" id="bFicha">Editar ficha</button>
     </div>
+    <label class="btn claro" style="display:flex;align-items:center;justify-content:center;flex-direction:row;color:var(--verde)">
+      <span id="txtFoto">${pr.con_foto ? 'Cambiar foto' : 'Añadir foto'}</span>
+      <input type="file" accept="image/*" capture="environment" id="nuevaFoto" class="oculto">
+    </label>
     <p class="peq">Códigos: ${cods.length ? cods.map(h).join(', ') : 'ninguno'}</p>`;
   if ($('#iaOk')) $('#iaOk').onclick = () => {
     const nuevo = { ...pr, estado_ia: '' };
@@ -408,6 +429,25 @@ VISTAS.producto = ({ pid, lec }) => {
   $('#bEntrada').onclick = () => ir('entrada', { pid, lec });
   $('#bSalida').onclick = () => ir('salida', { pid, lec });
   $('#bAjuste').onclick = () => ir('ajuste', { pid });
+  const mostrarFoto = (b64) => {
+    const f = $('#fotoProd');
+    if (!f || !b64) return;
+    f.querySelector('img').src = 'data:image/jpeg;base64,' + b64;
+    f.hidden = false;
+  };
+  if (pr.con_foto || pr._fotoLocal) fotoProducto(pid).then((b) => { if (pila[pila.length - 1]?.params?.pid === pid) mostrarFoto(b); });
+  $('#nuevaFoto').onchange = async (e) => {
+    const fich = e.target.files && e.target.files[0];
+    if (!fich) return;
+    const b64 = await fotoDeFichero(fich);
+    if (!b64) { aviso('No se pudo leer la foto'); return; }
+    await guardarFotoLocal(pid, b64);
+    mostrarFoto(b64);
+    encolar({ tipo: 'producto', producto: { ...pr }, codigos: [], fotos: [b64], identificar: false });
+    pr._fotoLocal = true; pr.con_foto = true; guardar('datos', datos);
+    $('#txtFoto').textContent = 'Cambiar foto';
+    aviso('Foto guardada');
+  };
   $('#bFicha').onclick = () => ir('ficha', { pid });
   vista.querySelectorAll('[data-anular]').forEach((b) => {
     b.onclick = () => {
@@ -454,6 +494,7 @@ VISTAS.codigoNuevo = (p) => {
       minimo: 0, notas: '', activo: true, estado_ia: p.fotos.length ? 'pendiente' : 'error'
     };
     encolar({ tipo: 'producto', producto: prod, codigos: [lec.clave], fotos: p.fotos.slice(-3), identificar: p.fotos.length > 0 });
+    if (p.fotos.length) { guardarFotoLocal(prod.id, p.fotos[p.fotos.length - 1]); prod.con_foto = true; }
     datos.productos.push(prod);
     datos.codigos.push({ codigo: lec.clave, producto_id: prod.id });
     guardar('datos', datos);

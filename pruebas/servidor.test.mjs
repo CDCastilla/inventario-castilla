@@ -235,3 +235,17 @@ test('identificación en segundo plano: tras 4 fallos queda en error y no se rei
   assert.equal(p.estado_ia, 'error');
   assert.match(p.notas, /IA:/);
 });
+
+test('foto del producto: añadir otra foto la pone la primera y se puede leer', () => {
+  const { llamar } = crearEntorno();
+  const f1 = Buffer.from('a'.repeat(300)).toString('base64');
+  const f2 = Buffer.from('b'.repeat(300)).toString('base64');
+  const prod = { id: 'P-FOTO0001', nombre: 'Guantes', uds_envase: 1, modo: 'abrir' };
+  llamar({ accion: 'enviar', ops: [{ tipo: 'producto', op_id: '1', producto: prod, codigos: [], fotos: [f1] }] });
+  let r = llamar({ accion: 'foto', producto_id: prod.id });
+  assert.equal(r.base64, f1);
+  r = llamar({ accion: 'enviar', ops: [{ tipo: 'producto', op_id: '2', producto: prod, codigos: [], fotos: [f2], identificar: false }] });
+  assert.equal(r.productos[0].estado_ia, '');
+  assert.equal(llamar({ accion: 'foto', producto_id: prod.id }).base64, f2);
+  assert.equal(llamar({ accion: 'foto', producto_id: 'P-NOEXISTE' }).base64, '');
+});
