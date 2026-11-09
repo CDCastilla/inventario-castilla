@@ -13,7 +13,7 @@
  *  - Editar la ficha de un producto nunca mueve stock.
  */
 
-var VERSION_SERVIDOR = '1.0.0';
+var VERSION_SERVIDOR = '1.0.1';
 
 var HOJAS = {
   PRODUCTOS: ['id', 'nombre', 'categoria', 'proveedor', 'ref_proveedor', 'uds_envase', 'modo', 'lote', 'armario', 'minimo', 'activo', 'notas', 'actualizado'],
@@ -86,8 +86,11 @@ function configurar() {
   var props = PropertiesService.getScriptProperties();
   if (!props.getProperty('CLAVE')) props.setProperty('CLAVE', nuevaClave_());
   instalarCopiaSemanal();
-  aviso_('Inventario configurado.\n\nClave de la app: ' + props.getProperty('CLAVE') +
-    '\n\nEscríbela en Ajustes de la app junto con la URL de la aplicación web.');
+  // Sin ventana: si se ejecuta desde el editor, una ventana se queda esperando en la hoja y agota el tiempo.
+  var texto = 'Inventario configurado. Clave de la app: ' + props.getProperty('CLAVE') +
+    ' (también en el menú Inventario → Ver la clave de la app).';
+  Logger.log(texto);
+  try { ss.toast(texto, 'Inventario', 30); } catch (e) { /* sin hoja abierta */ }
 }
 
 function verClave() {
