@@ -1,0 +1,8 @@
+{
+  "name": "inventario-castilla",
+  "private": true,
+  "description": "Inventario de Clínica Dental Castilla (PWA + Google Apps Script)",
+  "scripts": {
+    "test": "node --test pruebas/*.test.mjs"
+  }
+}

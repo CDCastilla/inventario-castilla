@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#00302C">
+<title>Inventario · Clínica Dental Castilla</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="iconos/icono-192.png">
+<link rel="apple-touch-icon" href="iconos/icono-192.png">
+<link rel="stylesheet" href="css/app.css?v=1">
+</head>
+<body>
+<header class="barra" id="barra">
+  <button class="volver" id="volver" aria-label="Volver" hidden>
+    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg>
+  </button>
+  <img src="iconos/monograma-beige.svg" alt="" class="logo" id="logo" width="26" height="30">
+  <h1 id="titulo">Inventario</h1>
+  <button class="sync" id="sync" aria-label="Sincronizar"><span id="syncTexto">…</span></button>
+</header>
+<main id="vista" tabindex="-1"></main>
+<div id="escaner" class="escaner" hidden>
+  <video id="video" playsinline muted></video>
+  <div class="marco" aria-hidden="true"></div>
+  <div class="escaner-pie">
+    <p id="escanerMsg">Apunta al código de la caja</p>
+    <form id="manual" class="fila">
+      <label class="oculto" for="manualTxt">Código</label>
+      <input id="manualTxt" placeholder="…o teclea el código" inputmode="text" autocomplete="off">
+      <button class="btn">OK</button>
+    </form>
+    <div class="fila">
+      <button class="btn claro" id="escanerBuscar">Buscar por nombre</button>
+      <button class="btn claro" id="escanerCerrar">Cerrar</button>
+    </div>
+  </div>
+</div>
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+<script type="module" src="js/app.js?v=1"></script>
+</body>
+</html>
