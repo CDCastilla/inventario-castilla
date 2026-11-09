@@ -13,7 +13,7 @@
  *  - Editar la ficha de un producto nunca mueve stock.
  */
 
-var VERSION_SERVIDOR = '1.1.0';
+var VERSION_SERVIDOR = '1.1.1';
 
 var HOJAS = {
   PRODUCTOS: ['id', 'nombre', 'categoria', 'proveedor', 'ref_proveedor', 'uds_envase', 'modo', 'lote', 'armario', 'minimo', 'activo', 'notas', 'actualizado'],
@@ -107,8 +107,10 @@ function nuevaClave_() {
   return Utilities.getUuid().replace(/-/g, '').slice(0, 12);
 }
 
+/** Sin ventanas que esperen: se escribe en el registro de ejecución y en un aviso de la hoja. */
 function aviso_(texto) {
-  try { SpreadsheetApp.getUi().alert(texto); } catch (e) { Logger.log(texto); }
+  Logger.log(texto);
+  try { SpreadsheetApp.getActiveSpreadsheet().toast(texto, 'Inventario', 60); } catch (e) { /* sin hoja abierta */ }
 }
 
 /* ───────────────────────── Aplicación web ───────────────────────── */
