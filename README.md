@@ -51,8 +51,10 @@ Para que al escanear un código nuevo la app lea el nombre de la caja sin escrib
 4. La primera vez que escanees, permite el uso de la cámara.
 
 ## Uso diario
-- **Escanear** una caja abre su ficha. Si el código es nuevo, la app manda la foto de la caja a Gemini y
-  propone nombre, marca, referencia, unidades y categoría: solo hay que elegir el armario y guardar.
+- **Escanear** una caja abre su ficha. Si el código es nuevo: (opcional) foto de la parte delantera y
+  **Guardar y seguir**. El producto se crea con un nombre provisional y se sigue con la entrada sin esperar.
+  Las fotos se guardan en Drive (*Inventario Castilla - Fotos*) y, en un par de minutos, Gemini lo identifica
+  con la foto y buscando el código en internet. El producto queda «por revisar»: se confirma con un toque.
 - **Entrada**: envases recibidos, lote y caducidad (se leen del DataMatrix), nº de factura o «pendiente».
 - **Salida**: cantidad y destino. *Consumido al abrir* descuenta el envase entero; *por unidades* descuenta
   las que se usan. Lo que va a un gabinete sale del stock para el pedido y queda anotado en el gabinete.

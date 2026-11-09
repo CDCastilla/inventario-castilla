@@ -5,7 +5,7 @@ import {
   unidadesSalida, normaliza, diasEntre, finCaducidad
 } from './logica.js';
 
-const VERSION_APP = '1.1.0';
+const VERSION_APP = '1.2.0';
 const $ = (s) => document.querySelector(s);
 const vista = $('#vista');
 
@@ -83,14 +83,20 @@ async function api(accion, extra = {}) {
   if (!cfg.url || !cfg.clave) throw new Error('Falta configurar la URL y la clave en Ajustes');
   if (!/^https:\/\/script\.google\.com\/macros\/s\/[^/]+\/exec$/.test(cfg.url)) throw new Error('La URL debe empezar por https://script.google.com/macros/s/ y terminar en /exec');
   let r;
+  const corte = new AbortController();
+  const t = setTimeout(() => corte.abort(), 60000);
   try {
     r = await fetch(cfg.url, {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify({ clave: cfg.clave, accion, ...extra })
+      body: JSON.stringify({ clave: cfg.clave, accion, ...extra }),
+      signal: corte.signal
     });
-  } catch {
+  } catch (e) {
+    if (e.name === 'AbortError') throw new Error('El servidor tarda demasiado. Se volverá a intentar solo.');
     throw new Error(navigator.onLine ? 'No se puede conectar con el servidor: revisa que la implementación tenga acceso «Cualquier usuario»' : 'Sin conexión a internet');
+  } finally {
+    clearTimeout(t);
   }
   if (!r.ok) throw new Error('El servidor respondió ' + r.status);
   const j = await r.json();
@@ -273,6 +279,10 @@ VISTAS.inicio = () => {
   if (!cfg.url) filas.push(`<button class="aviso-fila" data-ir="ajustes"><span>Configura la conexión con la hoja</span><span class="chip error">Ajustes</span></button>`);
   if (a.bajoMinimo.length) filas.push(`<button class="aviso-fila" data-ir="pedido"><span>Bajo mínimo · pedir</span><span class="chip aviso">${a.bajoMinimo.length}</span></button>`);
   if (a.caducan.length) filas.push(`<button class="aviso-fila" data-filtro="caduca"><span>Caducan en 60 días</span><span class="chip aviso">${a.caducan.length}</span></button>`);
+  const revisar = datos.productos.filter((x) => x.activo && (x.estado_ia === 'revisar' || x.estado_ia === 'error')).length;
+  const identificando = datos.productos.filter((x) => x.activo && x.estado_ia === 'pendiente').length;
+  if (revisar) filas.push(`<button class="aviso-fila" data-filtro="revisar"><span>Productos por revisar</span><span class="chip aviso">${revisar}</span></button>`);
+  if (identificando) filas.push(`<button class="aviso-fila" data-filtro="revisar"><span>Identificándose (foto e internet)</span><span class="chip">${identificando}</span></button>`);
   if (a.gabinetes.length) filas.push(`<button class="aviso-fila" data-ir="gabinetes"><span>Gabinetes · revisar dotación</span><span class="chip">${a.gabinetes.length}</span></button>`);
   if (cola.length) filas.push(`<button class="aviso-fila" data-sync><span>Movimientos sin enviar</span><span class="chip aviso">${cola.length}</span></button>`);
   if (rechazos.length) filas.push(`<button class="aviso-fila" data-ir="ajustes"><span>Rechazados por el servidor</span><span class="chip error">${rechazos.length}</span></button>`);
@@ -310,7 +320,7 @@ VISTAS.stock = (p) => {
   vista.innerHTML = `
     <label>Buscar<input type="search" id="buscar" placeholder="Nombre, referencia o proveedor" value="${h(estado.texto)}" autocomplete="off"></label>
     <div class="segmentos" role="group" aria-label="Filtro">
-      ${[['todo', 'Todo'], ['bajo', 'Bajo mínimo'], ['caduca', 'Caduca pronto'], ['sin', 'Sin stock']].map(([k, t]) => `<button data-f="${k}" aria-pressed="${estado.filtro === k}">${t}</button>`).join('')}
+      ${[['todo', 'Todo'], ['bajo', 'Bajo mínimo'], ['caduca', 'Caduca pronto'], ['sin', 'Sin stock'], ['revisar', 'Por revisar']].map(([k, t]) => `<button data-f="${k}" aria-pressed="${estado.filtro === k}">${t}</button>`).join('')}
     </div>
     <label>Armario<select id="armario"><option value="">Todos</option>${armarios.map((a) => `<option ${a === estado.armario ? 'selected' : ''}>${h(a)}</option>`).join('')}</select></label>
     <div class="lista" id="res"></div>`;
@@ -326,6 +336,7 @@ VISTAS.stock = (p) => {
       if (estado.filtro === 'bajo') return pr.minimo > 0 && t < pr.minimo;
       if (estado.filtro === 'caduca') return caducan.has(pr.id);
       if (estado.filtro === 'sin') return t <= 0;
+      if (estado.filtro === 'revisar') return !!pr.estado_ia;
       return true;
     }).sort((x, y) => x.nombre.localeCompare(y.nombre, 'es'));
     $('#res').innerHTML = lista.length ? lista.map((pr) => {
@@ -335,7 +346,7 @@ VISTAS.stock = (p) => {
       const prox = lotes.find((l) => l.caducidad);
       return `<button class="tarjeta item" data-pid="${h(pr.id)}">
         <span class="entre"><span class="fuerte">${h(pr.nombre)}</span><span class="cifra">${h(formatoCantidad(t, pr))}</span></span>
-        <span class="entre peq"><span>${h([pr.categoria, pr.armario].filter(Boolean).join(' · '))}${prox ? ' · cad. ' + cad(prox.caducidad) : ''}</span>${bajo ? `<span class="chip aviso">mín. ${pr.minimo}</span>` : ''}</span>
+        <span class="entre peq"><span>${h([pr.categoria, pr.armario].filter(Boolean).join(' · '))}${prox ? ' · cad. ' + cad(prox.caducidad) : ''}</span>${pr.estado_ia === 'pendiente' ? '<span class="chip">identificando</span>' : pr.estado_ia ? '<span class="chip aviso">revisar</span>' : bajo ? `<span class="chip aviso">mín. ${pr.minimo}</span>` : ''}</span>
       </button>`;
     }).join('') : `<p class="vacio">${datos.productos.length ? 'Nada con ese filtro.' : 'Aún no hay productos. Escanea una caja o crea uno nuevo.'}</p>`;
     $('#res').querySelectorAll('[data-pid]').forEach((b) => { b.onclick = () => abrirProducto(b.dataset.pid, p.elegir || 'ver'); });
@@ -362,7 +373,11 @@ VISTAS.producto = ({ pid, lec }) => {
   const movs = datos.movimientos.filter((m) => m.producto_id === pid).slice(-25).reverse();
   const pend = cola.filter((o) => o.tipo === 'movimiento' && o.movimiento.producto_id === pid);
   const cods = datos.codigos.filter((c) => c.producto_id === pid).map((c) => c.codigo);
+  const ia = pr.estado_ia === 'pendiente' ? '<p class="nota info">Identificando el producto (foto e internet). Puedes seguir trabajando: el nombre se completa solo en un par de minutos.</p>'
+    : pr.estado_ia === 'revisar' ? '<section class="tarjeta suave"><span class="fuerte">Revisa los datos que ha puesto la IA</span><span class="peq">Nombre, marca, referencia y categoría. Si están bien, pulsa «Correcto».</span><div class="fila"><button class="btn" id="iaOk" style="flex:1">Correcto</button><button class="btn claro" id="iaEditar" style="flex:1">Corregir</button></div></section>'
+    : pr.estado_ia === 'error' ? '<p class="nota">No se ha podido identificar automáticamente. Pulsa «Editar ficha» y escribe el nombre.</p>' : '';
   vista.innerHTML = `
+    ${ia}
     ${lec ? `<p class="nota info">Escaneado${lec.lote ? ' · lote ' + h(lec.lote) : ''}${lec.caducidad ? ' · cad. ' + cad(lec.caducidad) : ''}</p>` : ''}
     <section class="tarjeta">
       <span class="entre"><h2>${h(pr.nombre)}</h2><span class="cifra">${h(formatoCantidad(t, pr))}</span></span>
@@ -383,6 +398,13 @@ VISTAS.producto = ({ pid, lec }) => {
       <button class="btn claro" id="bFicha">Editar ficha</button>
     </div>
     <p class="peq">Códigos: ${cods.length ? cods.map(h).join(', ') : 'ninguno'}</p>`;
+  if ($('#iaOk')) $('#iaOk').onclick = () => {
+    const nuevo = { ...pr, estado_ia: '' };
+    encolar({ tipo: 'producto', producto: nuevo, codigos: [] });
+    datos.productos = datos.productos.map((x) => (x.id === pid ? nuevo : x));
+    guardar('datos', datos); aviso('Datos confirmados'); pintar();
+  };
+  if ($('#iaEditar')) $('#iaEditar').onclick = () => ir('ficha', { pid });
   $('#bEntrada').onclick = () => ir('entrada', { pid, lec });
   $('#bSalida').onclick = () => ir('salida', { pid, lec });
   $('#bAjuste').onclick = () => ir('ajuste', { pid });
@@ -401,46 +423,43 @@ VISTAS.codigoNuevo = (p) => {
   const { lec, intencion } = p;
   p.fotos = p.fotos || [];
   titulo('Producto nuevo');
-  const prop = p.propuesta;
   vista.innerHTML = `
     <section class="tarjeta">
       <h2>Código nuevo</h2>
       <span class="peq">${h(lec.clave)}${lec.lote ? ' · lote ' + h(lec.lote) : ''}${lec.caducidad ? ' · cad. ' + cad(lec.caducidad) : ''}</span>
     </section>
-    <section class="tarjeta" id="ia">
-      ${p.cargando ? '<h2>Identificando el producto…</h2><span class="peq">Leyendo la foto de la caja.</span>'
-        : prop ? `<span class="peq">Propuesta a partir de la foto</span><h2>${h(prop.nombre || '¿?')}</h2>
-          <span class="peq">${h([prop.marca, prop.ref_proveedor && 'REF ' + prop.ref_proveedor, prop.uds_envase > 1 && prop.uds_envase + ' ud./envase', prop.categoria].filter(Boolean).join(' · '))}</span>
-          ${prop.dudas ? `<span class="nota">${h(prop.dudas)}</span>` : ''}`
-        : p.error ? `<h2>No se ha podido identificar</h2><span class="peq">${h(p.error)}</span><button class="btn borde" id="reintentar">Reintentar</button>`
-        : '<h2>Haz una foto de la cara con el nombre</h2><span class="peq">La app lee el nombre, la marca, la referencia y las unidades.</span>'}
+    <section class="tarjeta suave">
+      <span>${p.fotos.length ? `${p.fotos.length} ${p.fotos.length === 1 ? 'foto' : 'fotos'} de la caja` : 'Sin foto'}</span>
+      <span class="peq">Guarda y sigue con la entrada: el nombre, la marca y la referencia se buscan solos (foto e internet) en un par de minutos. Luego solo tendrás que revisarlos.</span>
     </section>
-    ${prop ? '<button class="btn grande" id="usar">Usar estos datos</button>' : ''}
-    <label class="btn ${prop ? 'claro' : 'grande'}" style="display:flex;align-items:center;justify-content:center;flex-direction:row;color:${prop ? 'var(--verde)' : 'var(--beige)'}">
+    <label class="btn claro" style="display:flex;align-items:center;justify-content:center;flex-direction:row;color:var(--verde)">
       ${p.fotos.length ? 'Añadir foto de la parte delantera' : 'Hacer foto de la caja'}
       <input type="file" accept="image/*" capture="environment" id="foto" class="oculto">
     </label>
+    <button class="btn grande" id="seguir">Guardar y seguir</button>
     <div class="fila"><button class="btn claro" id="aMano" style="flex:1">Escribir a mano</button><button class="btn claro" id="existe" style="flex:1">Ya existe en la lista</button></div>
     <div class="lista" id="res" hidden></div>`;
-  const identificar = async () => {
-    p.cargando = true; p.error = ''; pintar();
-    try {
-      const j = await api('identificar', { imagenes: p.fotos.slice(-3), lectura: { gtin: lec.gtin, lote: lec.lote, caducidad: lec.caducidad, bruto: lec.clave } });
-      p.propuesta = j.propuesta;
-    } catch (e) { p.error = e.message; }
-    p.cargando = false;
-    if (pila[pila.length - 1].params === p) pintar();
-  };
-  if (p.fotos.length && !prop && !p.cargando && !p.error && !p.intentado && cfg.url) { p.intentado = true; identificar(); return; }
-  if ($('#reintentar')) $('#reintentar').onclick = () => identificar();
   $('#foto').onchange = async (e) => {
     const f = e.target.files && e.target.files[0];
     if (!f) return;
     const b64 = await fotoDeFichero(f);
     if (!b64) { aviso('No se pudo leer la foto'); return; }
-    p.fotos.push(b64); p.propuesta = null; identificar();
+    p.fotos.push(b64); pintar();
   };
-  if ($('#usar')) $('#usar').onclick = () => ir('ficha', { codigo: lec.clave, lec, intencion, propuesta: prop }, true);
+  $('#seguir').onclick = () => {
+    const sufijo = (lec.gtin || lec.clave).slice(-6);
+    const prod = {
+      id: nuevoIdProducto(), nombre: `Pendiente de identificar · …${sufijo}`, categoria: '', armario: leer('ultimoArmario', ''),
+      proveedor: '', ref_proveedor: '', modo: 'unidades', uds_envase: 1, lote: !!(lec.lote || lec.caducidad),
+      minimo: 0, notas: '', activo: true, estado_ia: p.fotos.length ? 'pendiente' : 'error'
+    };
+    encolar({ tipo: 'producto', producto: prod, codigos: [lec.clave], fotos: p.fotos.slice(-3), identificar: p.fotos.length > 0 });
+    datos.productos.push(prod);
+    datos.codigos.push({ codigo: lec.clave, producto_id: prod.id });
+    guardar('datos', datos);
+    if (!p.fotos.length) aviso('Sin foto no se puede identificar: edita la ficha cuando puedas');
+    abrirProducto(prod.id, intencion === 'salida' ? 'ver' : 'entrada', lec, true);
+  };
   $('#aMano').onclick = () => ir('ficha', { codigo: lec.clave, lec, intencion }, true);
   $('#existe').onclick = () => {
     const res = $('#res'); res.hidden = false;
@@ -536,7 +555,7 @@ VISTAS.ficha = ({ pid, codigo, lec, intencion, propuesta }) => {
       modo: fd.get('modo') === 'abrir' ? 'abrir' : 'unidades',
       uds_envase: Math.max(1, parseInt(fd.get('uds_envase'), 10) || 1),
       lote: !!fd.get('lote'), minimo: Math.max(0, Number(fd.get('minimo')) || 0),
-      notas: String(fd.get('notas') || '').trim(), activo: existente ? !!fd.get('activo') : true
+      notas: String(fd.get('notas') || '').trim(), activo: existente ? !!fd.get('activo') : true, estado_ia: ''
     };
     if (!prod.nombre) { aviso('Falta el nombre'); return; }
     if (prod.armario) guardar('ultimoArmario', prod.armario);

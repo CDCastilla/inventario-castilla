@@ -30,13 +30,29 @@ function crearEntorno() {
     getId: () => 'ID'
   };
   const props = {};
+  const disparadores = [];
+  const ficheros = new Map();
+  const carpeta = { getId: () => 'CARP', createFile: (b) => { const id = 'F' + (ficheros.size + 1); ficheros.set(id, b.bytes); return { getId: () => id }; } };
   const ctx = {
     SpreadsheetApp: { getActiveSpreadsheet: () => ss, getUi: () => { throw new Error('sin UI'); } },
     PropertiesService: { getScriptProperties: () => ({ getProperty: (k) => props[k] ?? null, setProperty: (k, v) => { props[k] = v; } }) },
     LockService: { getScriptLock: () => ({ waitLock() {}, releaseLock() {} }) },
-    Utilities: { getUuid: () => 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' },
+    Utilities: {
+      getUuid: () => 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', sleep() {},
+      base64Decode: (b) => Buffer.from(b, 'base64'), base64Encode: (b) => Buffer.from(b).toString('base64'),
+      newBlob: (bytes, tipo, nombre) => ({ bytes, tipo, nombre })
+    },
     Logger: { log() {} },
-    ScriptApp: { getProjectTriggers: () => [], newTrigger: () => { const t = { timeBased: () => t, onWeekDay: () => t, atHour: () => t, inTimezone: () => t, create: () => t }; return t; }, WeekDay: { MONDAY: 1 } },
+    ScriptApp: {
+      getProjectTriggers: () => disparadores.map((d) => ({ getHandlerFunction: () => d })),
+      newTrigger: (f) => { const t = { timeBased: () => t, onWeekDay: () => t, atHour: () => t, inTimezone: () => t, after: () => t, everyMinutes: () => t, create: () => { disparadores.push(f); return t; } }; return t; },
+      deleteTrigger: (t) => { const i = disparadores.indexOf(t.getHandlerFunction()); if (i >= 0) disparadores.splice(i, 1); },
+      WeekDay: { MONDAY: 1 }
+    },
+    DriveApp: {
+      getFolderById: () => carpeta, createFolder: () => carpeta,
+      getFileById: (id) => ({ getBlob: () => ({ getBytes: () => ficheros.get(id) }) })
+    },
     UrlFetchApp: { fetch: (url, opt) => ctx.__fetch(url, opt) },
     ContentService: { createTextOutput: (s) => ({ setMimeType: () => s }), MimeType: { JSON: 'json' } },
     console
@@ -45,7 +61,7 @@ function crearEntorno() {
   vm.runInContext(readFileSync(new URL('../servidor/Codigo.gs', import.meta.url), 'utf8'), ctx);
   ctx.configurar();
   const llamar = (pet) => JSON.parse(ctx.doPost({ postData: { contents: JSON.stringify({ clave: props.CLAVE, ...pet }) } }));
-  return { ctx, hojas, props, llamar };
+  return { ctx, hojas, props, llamar, disparadores, ficheros };
 }
 
 const guantes = { id: 'P-GUANTES01', nombre: 'Guantes S', categoria: 'Fungible', uds_envase: 1, modo: 'abrir', lote: false, minimo: 10 };
@@ -136,7 +152,7 @@ test('identificar: pide a Gemini y devuelve una propuesta saneada', () => {
   let peticion;
   ctx.__fetch = (url, opt) => {
     peticion = { url, cuerpo: JSON.parse(opt.payload), clave: opt.headers['x-goog-api-key'] };
-    const texto = JSON.stringify({ nombre: 'Guantes látex Santex talla S', marca: 'Santex', ref_proveedor: 'GD05NB', uds_envase: 100, categoria: 'Fungible', lote: '', caducidad: '2031-04', dudas: '' });
+    const texto = JSON.stringify({ nombre: 'Guantes látex Santex talla S', marca: 'Santex', ref_proveedor: 'GD05NB', uds_envase: 100, categoria: 'Fungible', lote: '', caducidad: '2031-04', fuente: '', dudas: '' });
     return { getResponseCode: () => 200, getContentText: () => JSON.stringify({ candidates: [{ content: { parts: [{ text: texto }] } }] }) };
   };
   r = llamar({ accion: 'identificar', imagenes: ['x'.repeat(200)], lectura: { gtin: '08437014559484' } });
@@ -145,7 +161,7 @@ test('identificar: pide a Gemini y devuelve una propuesta saneada', () => {
   assert.match(peticion.url, /gemini-flash-latest:generateContent$/);
   assert.match(peticion.cuerpo.contents[0].parts[0].text, /08437014559484/);
   assert.equal(peticion.cuerpo.contents[0].parts[1].inline_data.mime_type, 'image/jpeg');
-  assert.deepEqual(r.propuesta, { nombre: 'Guantes látex Santex talla S', marca: 'Santex', ref_proveedor: 'GD05NB', uds_envase: 100, categoria: 'Fungible', lote: '', caducidad: '2031-04', dudas: '' });
+  assert.deepEqual(r.propuesta, { nombre: 'Guantes látex Santex talla S', marca: 'Santex', ref_proveedor: 'GD05NB', uds_envase: 100, categoria: 'Fungible', lote: '', caducidad: '2031-04', fuente: '', dudas: '' });
   ctx.__fetch = () => ({ getResponseCode: () => 200, getContentText: () => JSON.stringify({ candidates: [{ content: { parts: [{ text: '{"nombre":"X","categoria":"Inventada","uds_envase":"abc"}' }] } }] }) });
   r = llamar({ accion: 'identificar', imagenes: ['x'.repeat(200)] });
   assert.equal(r.propuesta.categoria, '');
@@ -167,4 +183,55 @@ test('identificar: si Gemini está saturado reintenta y cambia de modelo', () =>
   assert.equal(r.propuesta.nombre, 'Eugenol 20 ml');
   assert.equal(urls.filter((u) => u.includes('gemini-flash-latest')).length, 2);
   assert.match(urls[2], /gemini-flash-lite-latest/);
+});
+
+test('alta sin esperar: foto a Drive, pendiente, identificación en segundo plano y revisión', () => {
+  const { llamar, props, ctx, disparadores, ficheros } = crearEntorno();
+  props.GEMINI_KEY = 'k';
+  const foto = Buffer.from('x'.repeat(300)).toString('base64');
+  const prov = { id: 'P-EUGENOL001', nombre: 'Pendiente de identificar · …240128', uds_envase: 1, modo: 'unidades', lote: true, estado_ia: 'pendiente' };
+  let r = llamar({ accion: 'enviar', ops: [
+    { tipo: 'producto', op_id: 'a', producto: prov, codigos: ['08436042240128'], fotos: [foto], identificar: true },
+    { tipo: 'movimiento', op_id: 'b', movimiento: { uuid: 'ue1', tipo: 'ENTRADA', producto_id: prov.id, lote: '020226', caducidad: '2028-02-28', cantidad: 2 } }
+  ] });
+  assert.ok(r.ok, r.error);
+  assert.equal(r.productos[0].estado_ia, 'pendiente');
+  assert.equal(ficheros.size, 1);
+  assert.ok(disparadores.includes('identificarAhora'));
+  assert.ok(disparadores.includes('identificarPendientes'));
+
+  let cuerpo;
+  ctx.__fetch = (url, opt) => {
+    cuerpo = JSON.parse(opt.payload);
+    const texto = 'Según la búsqueda: ```json\n' + JSON.stringify({ nombre: 'Eugenol 20 ml', marca: 'Proclinic', ref_proveedor: 'EUG', uds_envase: 1, categoria: 'Material clínico', fuente: 'foto e internet', dudas: '' }) + '\n```';
+    return { getResponseCode: () => 200, getContentText: () => JSON.stringify({ candidates: [{ content: { parts: [{ text: texto }] } }] }) };
+  };
+  ctx.identificarAhora();
+  assert.ok(!disparadores.includes('identificarAhora'));
+  assert.ok(cuerpo.tools && cuerpo.tools[0].google_search, 'usa la búsqueda en internet');
+  assert.match(cuerpo.contents[0].parts[0].text, /08436042240128/);
+  r = llamar({ accion: 'estado' });
+  const p = r.productos[0];
+  assert.equal(p.nombre, 'Eugenol 20 ml');
+  assert.equal(p.estado_ia, 'revisar');
+  assert.equal(p.categoria, 'Material clínico');
+  assert.equal(p.ref_proveedor, 'EUG');
+  assert.equal(r.stock[0].unidades, 2);
+
+  // El usuario confirma: deja de estar por revisar y no se pierde la foto.
+  r = llamar({ accion: 'enviar', ops: [{ tipo: 'producto', op_id: 'c', producto: { ...p, estado_ia: '' }, codigos: [] }] });
+  assert.equal(r.productos[0].estado_ia, '');
+  assert.equal(r.productos[0].con_foto, true);
+});
+
+test('identificación en segundo plano: tras 4 fallos queda en error y no se reintenta', () => {
+  const { llamar, props, ctx } = crearEntorno();
+  props.GEMINI_KEY = 'k';
+  const foto = Buffer.from('y'.repeat(300)).toString('base64');
+  llamar({ accion: 'enviar', ops: [{ tipo: 'producto', op_id: 'a', producto: { id: 'P-XXXXXXXX', nombre: 'Pendiente', uds_envase: 1, modo: 'unidades' }, codigos: ['08400000000000'], fotos: [foto], identificar: true }] });
+  ctx.__fetch = () => ({ getResponseCode: () => 503, getContentText: () => 'busy' });
+  for (let i = 0; i < 5; i++) ctx.identificarPendientes();
+  const p = llamar({ accion: 'estado' }).productos[0];
+  assert.equal(p.estado_ia, 'error');
+  assert.match(p.notas, /IA:/);
 });

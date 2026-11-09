@@ -13,10 +13,10 @@
  *  - Editar la ficha de un producto nunca mueve stock.
  */
 
-var VERSION_SERVIDOR = '1.1.2';
+var VERSION_SERVIDOR = '1.2.0';
 
 var HOJAS = {
-  PRODUCTOS: ['id', 'nombre', 'categoria', 'proveedor', 'ref_proveedor', 'uds_envase', 'modo', 'lote', 'armario', 'minimo', 'activo', 'notas', 'actualizado'],
+  PRODUCTOS: ['id', 'nombre', 'categoria', 'proveedor', 'ref_proveedor', 'uds_envase', 'modo', 'lote', 'armario', 'minimo', 'activo', 'notas', 'actualizado', 'foto', 'estado_ia', 'intentos_ia'],
   CODIGOS: ['codigo', 'producto_id', 'alta'],
   MOVIMIENTOS: ['uuid', 'fecha', 'tipo', 'producto_id', 'lote', 'caducidad', 'cantidad', 'destino', 'factura', 'origen', 'nota', 'anula_uuid', 'recibido'],
   FACTURAS: ['id', 'proveedor', 'numero', 'fecha', 'archivo', 'estado', 'alta'],
@@ -72,7 +72,7 @@ function configurar() {
     if (hoja.getLastRow() === 0) {
       hoja.getRange(1, 1, 1, cab.length).setValues([cab]).setFontWeight('bold');
       hoja.setFrozenRows(1);
-    }
+    } else asegurarCabeceras_(nombre);
     // Texto plano: así Sheets no convierte códigos (ceros a la izquierda) ni fechas.
     if (nombre !== 'STOCK') hoja.getRange(1, 1, hoja.getMaxRows(), cab.length).setNumberFormat('@');
   });
@@ -86,6 +86,7 @@ function configurar() {
   var props = PropertiesService.getScriptProperties();
   if (!props.getProperty('CLAVE')) props.setProperty('CLAVE', nuevaClave_());
   instalarCopiaSemanal();
+  try { programarIdentificacion_(); } catch (e) { Logger.log(e); }
   // Sin ventana: si se ejecuta desde el editor, una ventana se queda esperando en la hoja y agota el tiempo.
   var texto = 'Inventario configurado. Clave de la app: ' + props.getProperty('CLAVE') +
     ' (también en el menú Inventario → Ver la clave de la app).';
@@ -162,7 +163,7 @@ function producto_(o) {
     id: o.id, nombre: o.nombre, categoria: o.categoria, proveedor: o.proveedor, ref_proveedor: o.ref_proveedor,
     uds_envase: Number(o.uds_envase) || 1, modo: o.modo === 'abrir' ? 'abrir' : 'unidades',
     lote: o.lote === 'SI', armario: o.armario, minimo: Number(o.minimo) || 0,
-    activo: o.activo !== 'NO', notas: o.notas
+    activo: o.activo !== 'NO', notas: o.notas, estado_ia: o.estado_ia || '', con_foto: !!o.foto
   };
 }
 
@@ -252,13 +253,22 @@ function procesarOps_(ops) {
     filas_('CONFIG').forEach(function (c) { if (c.tipo === 'destino') destinos[c.nombre] = true; });
 
     var nuevosMovs = [], rechazados = [], resultados = [];
-    var cambiosProd = false;
+    var cambiosProd = false, hayPendientes = false;
+    asegurarCabeceras_('PRODUCTOS');
 
     ops.forEach(function (op) {
       try {
         if (op.tipo === 'producto') {
           var p = validarProducto_(op.producto);
-          var fila = [p.id, p.nombre, p.categoria, p.proveedor, p.ref_proveedor, p.uds_envase, p.modo, p.lote, p.armario, p.minimo, p.activo, p.notas, ahora];
+          var prev = prodIdx[p.id] !== undefined ? prodFilas[prodIdx[p.id]] : null;
+          var foto = prev ? prev.foto : '', intentos = prev ? prev.intentos_ia : '';
+          var estadoIa = op.producto.estado_ia !== undefined ? String(op.producto.estado_ia) : (prev ? prev.estado_ia : '');
+          if (['', 'pendiente', 'revisar', 'error'].indexOf(estadoIa) < 0) estadoIa = '';
+          if (Array.isArray(op.fotos) && op.fotos.length) {
+            foto = guardarFotos_(p.id, op.fotos) || foto;
+            if (op.identificar) { estadoIa = 'pendiente'; intentos = '0'; hayPendientes = true; }
+          }
+          var fila = [p.id, p.nombre, p.categoria, p.proveedor, p.ref_proveedor, p.uds_envase, p.modo, p.lote, p.armario, p.minimo, p.activo, p.notas, ahora, foto, estadoIa, intentos];
           if (prodIdx[p.id] !== undefined) {
             prodFilas[prodIdx[p.id]] = filaAObjeto_('PRODUCTOS', fila);
           } else {
@@ -313,6 +323,7 @@ function procesarOps_(ops) {
     anadir_('MOVIMIENTOS', nuevosMovs);
     anadir_('RECHAZADOS', rechazados);
     if (cambiosProd || nuevosMovs.length) recalcularStock();
+    if (hayPendientes) { try { programarIdentificacion_(); } catch (e) { Logger.log('No se pudo programar la identificación: ' + e); } }
 
     var estado = leerEstado_();
     estado.resultados = resultados;
@@ -352,7 +363,7 @@ function validarProducto_(p) {
     id: id, nombre: nombre, categoria: texto_(p.categoria, 80), proveedor: texto_(p.proveedor, 80),
     ref_proveedor: texto_(p.ref_proveedor, 60), uds_envase: uds,
     modo: p.modo === 'abrir' ? 'abrir' : 'unidades', lote: p.lote ? 'SI' : 'NO',
-    armario: texto_(p.armario, 80), minimo: minimo, activo: p.activo === false ? 'NO' : 'SI', notas: texto_(p.notas, 300)
+    armario: texto_(p.armario, 80), minimo: minimo, activo: p.activo === false ? 'NO' : 'SI', notas: texto_(p.notas, 500)
   };
 }
 
@@ -475,67 +486,213 @@ function exportarXlsx_() {
   return { ok: true, nombre: blob.getName(), base64: Utilities.base64Encode(blob.getBytes()) };
 }
 
-/* ───────────────────────── Identificar un producto por foto (Gemini) ───────────────────────── */
-
-/**
+/* ───────────────────────── Identificar productos con Gemini ───────────────────────── */
+/*
  * Necesita la propiedad del script GEMINI_KEY (clave de Google AI Studio).
  * Opcional: GEMINI_MODELO (por defecto gemini-flash-latest).
+ *
+ * Flujo normal (sin esperas en el móvil): la app da de alta el producto con un nombre provisional
+ * y sus fotos; las fotos se guardan en Drive («Inventario Castilla - Fotos») y el producto queda
+ * «pendiente». Un disparador en segundo plano pide a Gemini que lo identifique con la foto y, si hace
+ * falta, buscando el código (GTIN) en internet, y deja el producto «por revisar».
  */
-function identificar_(pet) {
+
+/** Añade a la cabecera las columnas nuevas (actualizaciones de versión). */
+function asegurarCabeceras_(nombre) {
+  var hoja = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(nombre);
+  if (!hoja) return;
+  var cab = HOJAS[nombre];
+  var actual = hoja.getRange(1, 1, 1, cab.length).getValues()[0].map(String);
+  if (actual.join('|') !== cab.join('|')) hoja.getRange(1, 1, 1, cab.length).setValues([cab]).setFontWeight('bold');
+}
+
+function carpeta_(prop, nombre) {
+  var props = PropertiesService.getScriptProperties();
+  var id = props.getProperty(prop), c = null;
+  try { c = id && DriveApp.getFolderById(id); } catch (e) { c = null; }
+  if (!c) { c = DriveApp.createFolder(nombre); props.setProperty(prop, c.getId()); }
+  return c;
+}
+
+function guardarFotos_(pid, fotos) {
+  var c = carpeta_('CARPETA_FOTOS', 'Inventario Castilla - Fotos');
+  var ids = [];
+  fotos.filter(function (b) { return typeof b === 'string' && b.length > 100; }).slice(0, 3).forEach(function (b, i) {
+    var blob = Utilities.newBlob(Utilities.base64Decode(b), 'image/jpeg', pid + '-' + (i + 1) + '.jpg');
+    ids.push(c.createFile(blob).getId());
+  });
+  return ids.join(',');
+}
+
+function programarIdentificacion_() {
+  var ts = ScriptApp.getProjectTriggers();
+  var ahora = ts.some(function (t) { return t.getHandlerFunction() === 'identificarAhora'; });
+  var periodico = ts.some(function (t) { return t.getHandlerFunction() === 'identificarPendientes'; });
+  if (!ahora) ScriptApp.newTrigger('identificarAhora').timeBased().after(10 * 1000).create();
+  if (!periodico) ScriptApp.newTrigger('identificarPendientes').timeBased().everyMinutes(15).create();
+}
+
+function identificarAhora() {
+  ScriptApp.getProjectTriggers().forEach(function (t) { if (t.getHandlerFunction() === 'identificarAhora') ScriptApp.deleteTrigger(t); });
+  identificarPendientes();
+}
+
+function catsConfig_() {
+  return filas_('CONFIG').filter(function (c) { return c.tipo === 'categoria'; });
+}
+
+/** Pide a Gemini los datos del producto. buscar = permitir búsqueda en Google por el GTIN. */
+function pedirGemini_(imagenes, lec, cats, buscar) {
   var props = PropertiesService.getScriptProperties();
   var key = props.getProperty('GEMINI_KEY');
   if (!key) throw new Error('Falta la clave de Gemini: Apps Script → Configuración del proyecto → Propiedades del script → GEMINI_KEY');
   var modelo = props.getProperty('GEMINI_MODELO') || 'gemini-flash-latest';
-  var imagenes = (pet.imagenes || []).filter(function (b) { return typeof b === 'string' && b.length > 100; }).slice(-3);
-  if (!imagenes.length) throw new Error('No ha llegado ninguna foto');
-  var cats = filas_('CONFIG').filter(function (c) { return c.tipo === 'categoria'; }).map(function (c) { return c.nombre; });
-  var lec = pet.lectura || {};
+  lec = lec || {};
   var prompt = [
-    'Eres el asistente de inventario de una clínica dental en España. Las fotos son de un envase de producto (material dental, medicamento, fungible o limpieza).',
-    'Datos ya leídos del código de barras: GTIN ' + (lec.gtin || '—') + ', lote ' + (lec.lote || '—') + ', caducidad ' + (lec.caducidad || '—') + '.',
-    'Devuelve SOLO un objeto JSON con estas claves:',
+    'Eres el asistente de inventario de una clínica dental en España. Hay que identificar un producto (material dental, medicamento, fungible o limpieza).',
+    'Datos leídos del código de barras: GTIN ' + (lec.gtin || '—') + ', lote ' + (lec.lote || '—') + ', caducidad ' + (lec.caducidad || '—') + '.',
+    imagenes.length ? 'Te adjunto foto(s) del envase.' : 'No hay fotos.',
+    buscar && lec.gtin ? 'Si la foto no basta para saber qué producto es, busca el GTIN en internet (también sin el cero inicial, como EAN-13).' : '',
+    'Responde SOLO con un objeto JSON con estas claves:',
     '- nombre: en español, corto (máx. 60 caracteres), como lo llamaría la clínica: tipo de producto + marca + modelo, medida, talla, color o concentración. Ejemplos: "Guantes látex Santex talla S", "Implante Klockner Essential Cone 4.0×10", "Meganest 40 mg/ml 1:100.000", "Dentasept Tri Enzymatic 5 L".',
     '- marca: marca o fabricante.',
     '- ref_proveedor: la referencia del fabricante (texto tras REF o Ref.), o "" si no aparece.',
-    '- uds_envase: número entero de unidades que contiene el envase (p. ej. 100 guantes, 50 carpules, 7 aplicaciones = 1 envase de 1 g → pon 1 si no hay unidades separables). 1 si no consta.',
+    '- uds_envase: número entero de unidades separables que contiene el envase (100 guantes, 50 carpules, 5 fresas); 1 si no consta.',
     '- categoria: exactamente una de: ' + cats.join(' | ') + '.',
-    '- lote y caducidad: solo si se leen en la foto y no venían en el código (caducidad como AAAA-MM o AAAA-MM-DD), si no "".',
-    '- dudas: frase corta si algo no se lee bien en la foto; "" si todo está claro.',
-    'No inventes datos que no se vean.'
-  ].join('\n');
+    '- lote y caducidad: solo si se leen en la foto y no venían en el código (caducidad AAAA-MM o AAAA-MM-DD), si no "".',
+    '- fuente: "foto", "internet" o "foto e internet".',
+    '- dudas: frase corta si algo no está claro; "" si todo está claro.',
+    'No inventes datos: si no lo sabes, deja el campo vacío.'
+  ].filter(String).join('\n');
   var partes = [{ text: prompt }].concat(imagenes.map(function (b) { return { inline_data: { mime_type: 'image/jpeg', data: b } }; }));
-  // Si un modelo está saturado (503/429/500) se reintenta y, si sigue, se prueba el siguiente.
+  var cuerpoJson = { contents: [{ parts: partes }], generationConfig: { responseMimeType: 'application/json', temperature: 0.1 } };
+  var cuerpoBusqueda = { contents: [{ parts: partes }], tools: [{ google_search: {} }], generationConfig: { temperature: 0.1 } };
+  var cuerpos = buscar && lec.gtin ? [cuerpoBusqueda, cuerpoJson] : [cuerpoJson];
+
   var modelos = [modelo].concat(['gemini-flash-latest', 'gemini-flash-lite-latest', 'gemini-2.5-flash'].filter(function (m) { return m !== modelo; }));
-  var cuerpo = JSON.stringify({ contents: [{ parts: partes }], generationConfig: { responseMimeType: 'application/json', temperature: 0.1 } });
-  var resp = null, ultimoError = '';
-  for (var i = 0; i < modelos.length && !resp; i++) {
-    for (var intento = 0; intento < 2; intento++) {
-      var r = UrlFetchApp.fetch('https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(modelos[i]) + ':generateContent', {
-        method: 'post', contentType: 'application/json', muteHttpExceptions: true,
-        headers: { 'x-goog-api-key': key }, payload: cuerpo
-      });
-      var code = r.getResponseCode();
-      if (code === 200) { resp = r; break; }
-      ultimoError = modelos[i] + ' respondió ' + code + ': ' + r.getContentText().slice(0, 200);
-      if (code === 400 || code === 401 || code === 403) throw new Error('Gemini: ' + ultimoError);
-      if (code === 404) break; // modelo no disponible: probar el siguiente
-      Utilities.sleep(1500 * (intento + 1));
+  var ultimoError = '';
+  for (var c = 0; c < cuerpos.length; c++) {
+    for (var i = 0; i < modelos.length; i++) {
+      for (var intento = 0; intento < 2; intento++) {
+        var r = UrlFetchApp.fetch('https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(modelos[i]) + ':generateContent', {
+          method: 'post', contentType: 'application/json', muteHttpExceptions: true,
+          headers: { 'x-goog-api-key': key }, payload: JSON.stringify(cuerpos[c])
+        });
+        var code = r.getResponseCode();
+        if (code === 200) {
+          var d = leerJsonGemini_(r.getContentText());
+          if (d) return sanearPropuesta_(d, cats);
+          ultimoError = 'respuesta sin JSON';
+          break;
+        }
+        ultimoError = modelos[i] + ' respondió ' + code + ': ' + r.getContentText().slice(0, 200);
+        if (code === 401 || code === 403) throw new Error('Gemini: ' + ultimoError);
+        if (code === 400 || code === 404) break; // modelo o herramienta no disponible: probar lo siguiente
+        Utilities.sleep(1500 * (intento + 1));
+      }
     }
   }
-  if (!resp) throw new Error('Gemini está saturado ahora mismo. Prueba otra vez en un momento. (' + ultimoError + ')');
-  var j = JSON.parse(resp.getContentText());
-  var txt = ((j.candidates && j.candidates[0] && j.candidates[0].content && j.candidates[0].content.parts) || [])
-    .map(function (p) { return p.text || ''; }).join('').replace(/^```(json)?|```$/g, '').trim();
-  var d;
-  try { d = JSON.parse(txt); } catch (e) { throw new Error('Respuesta de Gemini no válida'); }
-  var cat = cats.indexOf(String(d.categoria || '')) >= 0 ? String(d.categoria) : '';
+  throw new Error('Gemini no ha podido identificarlo ahora (' + ultimoError + ')');
+}
+
+function leerJsonGemini_(texto) {
+  try {
+    var j = JSON.parse(texto);
+    var t = ((j.candidates && j.candidates[0] && j.candidates[0].content && j.candidates[0].content.parts) || [])
+      .map(function (p) { return p.text || ''; }).join('');
+    var a = t.indexOf('{'), b = t.lastIndexOf('}');
+    if (a < 0 || b < a) return null;
+    return JSON.parse(t.slice(a, b + 1));
+  } catch (e) { return null; }
+}
+
+function sanearPropuesta_(d, cats) {
   var cad = String(d.caducidad || '');
   return {
-    ok: true,
-    propuesta: {
-      nombre: texto_(d.nombre, 120), marca: texto_(d.marca, 80), ref_proveedor: texto_(d.ref_proveedor, 60),
-      uds_envase: Math.max(1, Math.floor(Number(d.uds_envase) || 1)), categoria: cat,
-      lote: texto_(d.lote, 40), caducidad: /^\d{4}-\d{2}(-\d{2})?$/.test(cad) ? cad : '', dudas: texto_(d.dudas, 200)
-    }
+    nombre: texto_(d.nombre, 120), marca: texto_(d.marca, 80), ref_proveedor: texto_(d.ref_proveedor, 60),
+    uds_envase: Math.max(1, Math.floor(Number(d.uds_envase) || 1)),
+    categoria: cats.indexOf(String(d.categoria || '')) >= 0 ? String(d.categoria) : '',
+    lote: texto_(d.lote, 40), caducidad: /^\d{4}-\d{2}(-\d{2})?$/.test(cad) ? cad : '',
+    fuente: texto_(d.fuente, 30), dudas: texto_(d.dudas, 200)
   };
+}
+
+/** Identificación inmediata (la app espera la respuesta). */
+function identificar_(pet) {
+  var imagenes = (pet.imagenes || []).filter(function (b) { return typeof b === 'string' && b.length > 100; }).slice(-3);
+  if (!imagenes.length) throw new Error('No ha llegado ninguna foto');
+  var cats = catsConfig_().map(function (c) { return c.nombre; });
+  return { ok: true, propuesta: pedirGemini_(imagenes, pet.lectura || {}, cats, false) };
+}
+
+/** Identifica en segundo plano los productos «pendiente» (máx. 5 por vuelta). */
+function identificarPendientes() {
+  if (!PropertiesService.getScriptProperties().getProperty('GEMINI_KEY')) return;
+  asegurarCabeceras_('PRODUCTOS');
+  var pendientes = filas_('PRODUCTOS').filter(function (p) { return p.estado_ia === 'pendiente'; }).slice(0, 5);
+  if (!pendientes.length) return;
+  var codigos = filas_('CODIGOS');
+  var cfgCats = catsConfig_();
+  var cats = cfgCats.map(function (c) { return c.nombre; });
+  var resultados = {};
+  pendientes.forEach(function (p) {
+    var gtin = (codigos.filter(function (c) { return c.producto_id === p.id && /^\d{14}$/.test(c.codigo); })[0] || {}).codigo || '';
+    var imgs = String(p.foto || '').split(',').filter(String).map(function (id) {
+      try { return Utilities.base64Encode(DriveApp.getFileById(id).getBlob().getBytes()); } catch (e) { return null; }
+    }).filter(Boolean);
+    try { resultados[p.id] = { ok: true, d: pedirGemini_(imgs, { gtin: gtin }, cats, true) }; }
+    catch (e) { resultados[p.id] = { ok: false, error: String(e.message || e) }; }
+  });
+
+  // Escribir con bloqueo, sobre la versión actual de la hoja.
+  var lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    var filas = filas_('PRODUCTOS');
+    var conMovs = {};
+    filas_('MOVIMIENTOS').forEach(function (m) { conMovs[m.producto_id] = true; });
+    var cambios = false;
+    filas.forEach(function (p) {
+      var r = resultados[p.id];
+      if (!r || p.estado_ia !== 'pendiente') return; // si alguien la ha editado mientras tanto, no se toca
+      cambios = true;
+      if (!r.ok) {
+        var n = (Number(p.intentos_ia) || 0) + 1;
+        p.intentos_ia = String(n);
+        if (n >= 4) { p.estado_ia = 'error'; p.notas = (p.notas ? p.notas + ' · ' : '') + 'IA: ' + r.error.slice(0, 120); }
+        return;
+      }
+      aplicarPropuesta_(p, r.d, cfgCats, !!conMovs[p.id]);
+      p.estado_ia = 'revisar';
+    });
+    if (cambios) {
+      var cab = HOJAS.PRODUCTOS;
+      SpreadsheetApp.getActiveSpreadsheet().getSheetByName('PRODUCTOS').getRange(2, 1, filas.length, cab.length)
+        .setNumberFormat('@').setValues(filas.map(function (p) { return cab.map(function (c) { return p[c]; }); }));
+      recalcularStock();
+    }
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function aplicarPropuesta_(p, d, cfgCats, tieneMovimientos) {
+  if (d.nombre) p.nombre = d.nombre;
+  if (!p.proveedor && d.marca) p.proveedor = d.marca;
+  if (!p.ref_proveedor && d.ref_proveedor) p.ref_proveedor = d.ref_proveedor;
+  if (!p.categoria && d.categoria) {
+    p.categoria = d.categoria;
+    var c = cfgCats.filter(function (x) { return x.nombre === d.categoria; })[0];
+    if (c && !tieneMovimientos) p.modo = c.modo_defecto === 'abrir' ? 'abrir' : 'unidades';
+    if (c && c.lote_defecto === 'SI') p.lote = 'SI';
+  }
+  var notas = [];
+  if (d.uds_envase > 1) {
+    // Cambiar las unidades por envase con stock ya registrado alteraría el stock: entonces solo se anota.
+    if (p.modo !== 'abrir' && !tieneMovimientos && Number(p.uds_envase) <= 1) p.uds_envase = String(d.uds_envase);
+    else notas.push('envase de ' + d.uds_envase + ' u.');
+  }
+  if (d.fuente) notas.push('identificado por IA (' + d.fuente + ')');
+  if (d.dudas) notas.push(d.dudas);
+  if (notas.length) p.notas = ((p.notas ? p.notas + ' · ' : '') + notas.join(' · ')).slice(0, 500);
 }
