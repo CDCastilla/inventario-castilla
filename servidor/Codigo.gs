@@ -13,7 +13,7 @@
  *  - Editar la ficha de un producto nunca mueve stock.
  */
 
-var VERSION_SERVIDOR = '1.1.1';
+var VERSION_SERVIDOR = '1.1.2';
 
 var HOJAS = {
   PRODUCTOS: ['id', 'nombre', 'categoria', 'proveedor', 'ref_proveedor', 'uds_envase', 'modo', 'lote', 'armario', 'minimo', 'activo', 'notas', 'actualizado'],
@@ -504,13 +504,25 @@ function identificar_(pet) {
     'No inventes datos que no se vean.'
   ].join('\n');
   var partes = [{ text: prompt }].concat(imagenes.map(function (b) { return { inline_data: { mime_type: 'image/jpeg', data: b } }; }));
-  var resp = UrlFetchApp.fetch('https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(modelo) + ':generateContent', {
-    method: 'post', contentType: 'application/json', muteHttpExceptions: true,
-    headers: { 'x-goog-api-key': key },
-    payload: JSON.stringify({ contents: [{ parts: partes }], generationConfig: { responseMimeType: 'application/json', temperature: 0.1 } })
-  });
-  var code = resp.getResponseCode();
-  if (code !== 200) throw new Error('Gemini respondió ' + code + ': ' + resp.getContentText().slice(0, 300));
+  // Si un modelo está saturado (503/429/500) se reintenta y, si sigue, se prueba el siguiente.
+  var modelos = [modelo].concat(['gemini-flash-latest', 'gemini-flash-lite-latest', 'gemini-2.5-flash'].filter(function (m) { return m !== modelo; }));
+  var cuerpo = JSON.stringify({ contents: [{ parts: partes }], generationConfig: { responseMimeType: 'application/json', temperature: 0.1 } });
+  var resp = null, ultimoError = '';
+  for (var i = 0; i < modelos.length && !resp; i++) {
+    for (var intento = 0; intento < 2; intento++) {
+      var r = UrlFetchApp.fetch('https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(modelos[i]) + ':generateContent', {
+        method: 'post', contentType: 'application/json', muteHttpExceptions: true,
+        headers: { 'x-goog-api-key': key }, payload: cuerpo
+      });
+      var code = r.getResponseCode();
+      if (code === 200) { resp = r; break; }
+      ultimoError = modelos[i] + ' respondió ' + code + ': ' + r.getContentText().slice(0, 200);
+      if (code === 400 || code === 401 || code === 403) throw new Error('Gemini: ' + ultimoError);
+      if (code === 404) break; // modelo no disponible: probar el siguiente
+      Utilities.sleep(1500 * (intento + 1));
+    }
+  }
+  if (!resp) throw new Error('Gemini está saturado ahora mismo. Prueba otra vez en un momento. (' + ultimoError + ')');
   var j = JSON.parse(resp.getContentText());
   var txt = ((j.candidates && j.candidates[0] && j.candidates[0].content && j.candidates[0].content.parts) || [])
     .map(function (p) { return p.text || ''; }).join('').replace(/^```(json)?|```$/g, '').trim();

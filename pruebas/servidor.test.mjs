@@ -151,3 +151,20 @@ test('identificar: pide a Gemini y devuelve una propuesta saneada', () => {
   assert.equal(r.propuesta.categoria, '');
   assert.equal(r.propuesta.uds_envase, 1);
 });
+
+test('identificar: si Gemini está saturado reintenta y cambia de modelo', () => {
+  const { llamar, props, ctx } = crearEntorno();
+  props.GEMINI_KEY = 'k';
+  ctx.Utilities.sleep = () => {};
+  const urls = [];
+  ctx.__fetch = (url) => {
+    urls.push(url);
+    if (url.includes('gemini-flash-latest')) return { getResponseCode: () => 503, getContentText: () => '{"error":"high demand"}' };
+    return { getResponseCode: () => 200, getContentText: () => JSON.stringify({ candidates: [{ content: { parts: [{ text: '{"nombre":"Eugenol 20 ml","categoria":"Material clínico","uds_envase":1}' }] } }] }) };
+  };
+  const r = llamar({ accion: 'identificar', imagenes: ['x'.repeat(200)] });
+  assert.ok(r.ok, r.error);
+  assert.equal(r.propuesta.nombre, 'Eugenol 20 ml');
+  assert.equal(urls.filter((u) => u.includes('gemini-flash-latest')).length, 2);
+  assert.match(urls[2], /gemini-flash-lite-latest/);
+});

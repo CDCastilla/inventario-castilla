@@ -412,7 +412,7 @@ VISTAS.codigoNuevo = (p) => {
         : prop ? `<span class="peq">Propuesta a partir de la foto</span><h2>${h(prop.nombre || '¿?')}</h2>
           <span class="peq">${h([prop.marca, prop.ref_proveedor && 'REF ' + prop.ref_proveedor, prop.uds_envase > 1 && prop.uds_envase + ' ud./envase', prop.categoria].filter(Boolean).join(' · '))}</span>
           ${prop.dudas ? `<span class="nota">${h(prop.dudas)}</span>` : ''}`
-        : p.error ? `<h2>No se ha podido identificar</h2><span class="peq">${h(p.error)}</span>`
+        : p.error ? `<h2>No se ha podido identificar</h2><span class="peq">${h(p.error)}</span><button class="btn borde" id="reintentar">Reintentar</button>`
         : '<h2>Haz una foto de la cara con el nombre</h2><span class="peq">La app lee el nombre, la marca, la referencia y las unidades.</span>'}
     </section>
     ${prop ? '<button class="btn grande" id="usar">Usar estos datos</button>' : ''}
@@ -432,6 +432,7 @@ VISTAS.codigoNuevo = (p) => {
     if (pila[pila.length - 1].params === p) pintar();
   };
   if (p.fotos.length && !prop && !p.cargando && !p.error && !p.intentado && cfg.url) { p.intentado = true; identificar(); return; }
+  if ($('#reintentar')) $('#reintentar').onclick = () => identificar();
   $('#foto').onchange = async (e) => {
     const f = e.target.files && e.target.files[0];
     if (!f) return;
