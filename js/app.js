@@ -770,6 +770,16 @@ VISTAS.ajustes = () => {
 };
 
 /* ───────────── Arranque ───────────── */
+// Configuración por enlace: …/inventario-castilla/#url=<URL /exec>&clave=<clave>
+(() => {
+  const q = new URLSearchParams(location.hash.slice(1));
+  const url = (q.get('url') || '').trim(), clave = (q.get('clave') || '').trim();
+  if (url.startsWith('https://script.google.com/') && clave) {
+    cfg = { url, clave }; guardar('cfg', cfg);
+    history.replaceState(null, '', location.pathname);
+    setTimeout(() => aviso('Conexión configurada'), 300);
+  }
+})();
 ir('inicio');
 sincronizar();
 setInterval(() => { if (navigator.onLine) sincronizar(); }, 60000);
