@@ -185,8 +185,9 @@ test('identificar: si Gemini está saturado reintenta y cambia de modelo', () =>
   const r = llamar({ accion: 'identificar', imagenes: ['x'.repeat(200)] });
   assert.ok(r.ok, r.error);
   assert.equal(r.propuesta.nombre, 'Eugenol 20 ml');
-  assert.equal(urls.filter((u) => u.includes('gemini-flash-latest')).length, 2);
-  assert.match(urls[2], /gemini-flash-lite-latest/);
+  const gen = urls.filter((u) => u.includes(':generateContent'));
+  assert.equal(gen.filter((u) => u.includes('gemini-flash-latest')).length, 2);
+  assert.match(gen[2], /gemini-flash-lite-latest/);
 });
 
 test('alta sin esperar: foto a Drive, pendiente, identificación en segundo plano y revisión', () => {
@@ -366,4 +367,20 @@ test('imágenes: si Gemini falla por cuota no se marca nada y se guarda el error
   assert.equal(r.productos[0].con_foto, true);
   assert.ok(r.productos[0].foto_v);
   assert.equal(r.imagenes.conFoto, 1);
+});
+
+test('modelos de Gemini: se piden los disponibles y se descartan los retirados', () => {
+  const { ctx, props } = crearEntorno();
+  props.GEMINI_KEY = 'k';
+  ctx.__fetch = (url) => ({ getResponseCode: () => 200, getContentText: () => JSON.stringify({ models: [
+    { name: 'models/gemini-3.5-flash', supportedGenerationMethods: ['generateContent'] },
+    { name: 'models/gemini-flash-latest', supportedGenerationMethods: ['generateContent'] },
+    { name: 'models/gemini-3.5-flash-lite', supportedGenerationMethods: ['generateContent'] },
+    { name: 'models/gemini-3.5-flash-image', supportedGenerationMethods: ['generateContent'] },
+    { name: 'models/text-embedding-9', supportedGenerationMethods: ['embedContent'] }
+  ] }) });
+  const m = ctx.modelosGemini_();
+  assert.deepEqual([...m], ['gemini-flash-latest', 'gemini-3.5-flash', 'gemini-3.5-flash-lite']);
+  props.GEMINI_MODELO = 'gemini-3.5-flash-lite';
+  assert.equal(ctx.modelosGemini_()[0], 'gemini-3.5-flash-lite');
 });

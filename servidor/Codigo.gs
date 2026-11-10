@@ -13,7 +13,7 @@
  *  - Editar la ficha de un producto nunca mueve stock.
  */
 
-var VERSION_SERVIDOR = '1.5.0';
+var VERSION_SERVIDOR = '1.5.1';
 
 var HOJAS = {
   PRODUCTOS: ['id', 'nombre', 'categoria', 'proveedor', 'ref_proveedor', 'uds_envase', 'modo', 'lote', 'armario', 'minimo', 'activo', 'notas', 'actualizado', 'foto', 'estado_ia', 'intentos_ia', 'img_estado', 'fusionado_en'],
@@ -65,6 +65,7 @@ function onOpen() {
     .addItem('Cargar catálogo (pestaña CATALOGO_IMPORTAR)', 'cargarCatalogo')
     .addItem('Buscar imágenes ahora (5 min)', 'buscarImagenesAhora')
     .addItem('Volver a buscar imágenes no encontradas', 'reintentarImagenes')
+    .addItem('Probar conexión con Gemini', 'probarGemini')
     .addToUi();
 }
 
@@ -744,7 +745,7 @@ function pedirGemini_(imagenes, lec, cats, buscar) {
   var cuerpoBusqueda = { contents: [{ parts: partes }], tools: [{ google_search: {} }], generationConfig: { temperature: 0.1 } };
   var cuerpos = buscar && lec.gtin ? [cuerpoBusqueda, cuerpoJson] : [cuerpoJson];
 
-  var modelos = [modelo].concat(['gemini-flash-latest', 'gemini-flash-lite-latest', 'gemini-2.5-flash'].filter(function (m) { return m !== modelo; }));
+  var modelos = modelosGemini_();
   var ultimoError = '';
   for (var c = 0; c < cuerpos.length; c++) {
     for (var i = 0; i < modelos.length; i++) {
@@ -1028,8 +1029,8 @@ function buscarUrlImagen_(p) {
   var prompt = 'Busca en internet la página de este producto dental en la web del fabricante o de un distribuidor dental: "' + p.nombre + '"' +
     (p.ref_proveedor ? ', referencia ' + p.ref_proveedor : '') + (p.proveedor ? ', vendido por ' + p.proveedor : '') +
     '. Responde SOLO con JSON: {"pagina": "URL de la página del producto o vacío", "imagen": "URL directa de la imagen del producto o vacío"}. No inventes URLs.';
-  var modelos = [modelo, 'gemini-flash-latest', 'gemini-flash-lite-latest', 'gemini-2.5-flash'].filter(function (m, i, a) { return a.indexOf(m) === i; });
-  var ultimo = '';
+  var modelos = modelosGemini_();
+  var errores = [];
   for (var i = 0; i < modelos.length; i++) {
     var r = UrlFetchApp.fetch('https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(modelos[i]) + ':generateContent', {
       method: 'post', contentType: 'application/json', muteHttpExceptions: true, headers: { 'x-goog-api-key': key },
@@ -1037,7 +1038,7 @@ function buscarUrlImagen_(p) {
     });
     var code = r.getResponseCode();
     if (code !== 200) {
-      ultimo = modelos[i] + ' ' + code + ': ' + r.getContentText().slice(0, 150);
+      errores.push(modelos[i] + ' ' + code + ': ' + mensajeGemini_(r.getContentText()));
       if (code === 401 || code === 403) break;
       continue;
     }
@@ -1057,7 +1058,7 @@ function buscarUrlImagen_(p) {
     }
     return { estado: 'sin', url: '' };
   }
-  return { estado: 'error', error: ultimo || 'Gemini no responde' };
+  return { estado: 'error', error: errores.join(' | ') || 'Gemini no responde' };
 }
 
 /** Lee la imagen principal (og:image) de una página de producto. */
@@ -1087,4 +1088,73 @@ function descargarImagen_(url, soloComprobar) {
     if (!/^image\/(jpeg|jpg|png|webp)/i.test(tipo) || n < 3000 || n > 4000000) return null;
     return soloComprobar ? true : b;
   } catch (e) { return null; }
+}
+
+/* ───────────────────────── Modelos de Gemini ───────────────────────── */
+
+function mensajeGemini_(texto) {
+  try { var j = JSON.parse(texto); return String(j.error && j.error.message || texto).slice(0, 160); } catch (e) { return String(texto).slice(0, 160); }
+}
+
+/**
+ * Lista de modelos a probar, en orden. Google retira modelos con el tiempo: se piden los disponibles
+ * para esta clave (se guarda la lista 12 horas). GEMINI_MODELO, si existe, va primero.
+ */
+function modelosGemini_() {
+  var props = PropertiesService.getScriptProperties();
+  var fijo = props.getProperty('GEMINI_MODELO');
+  var guardado = props.getProperty('GEMINI_MODELOS');
+  var lista = null;
+  if (guardado) {
+    try { var g = JSON.parse(guardado); if (Date.now() - g.t < 12 * 3600 * 1000 && g.m.length) lista = g.m; } catch (e) { lista = null; }
+  }
+  if (!lista) {
+    lista = [];
+    try {
+      var r = UrlFetchApp.fetch('https://generativelanguage.googleapis.com/v1beta/models?pageSize=200', {
+        muteHttpExceptions: true, headers: { 'x-goog-api-key': props.getProperty('GEMINI_KEY') }
+      });
+      if (r.getResponseCode() === 200) {
+        lista = (JSON.parse(r.getContentText()).models || [])
+          .filter(function (m) {
+            var n = String(m.name || '');
+            return (m.supportedGenerationMethods || []).indexOf('generateContent') >= 0 && /flash/.test(n) &&
+              !/image|tts|audio|live|embedding|thinking|exp|preview/.test(n);
+          })
+          .map(function (m) { return String(m.name).replace(/^models\//, ''); })
+          .sort(function (a, b) {
+            var la = /-latest$/.test(a) ? 0 : 1, lb = /-latest$/.test(b) ? 0 : 1;
+            if (la !== lb) return la - lb;
+            var lite = (/lite/.test(a) ? 1 : 0) - (/lite/.test(b) ? 1 : 0);
+            if (lite) return lite;
+            return b.localeCompare(a, 'en', { numeric: true });
+          });
+        if (lista.length) props.setProperty('GEMINI_MODELOS', JSON.stringify({ t: Date.now(), m: lista.slice(0, 6) }));
+      }
+    } catch (e) { Logger.log('Lista de modelos: ' + e); }
+    if (!lista.length) lista = ['gemini-flash-latest', 'gemini-flash-lite-latest'];
+  }
+  if (fijo) lista = [fijo].concat(lista.filter(function (m) { return m !== fijo; }));
+  return lista.slice(0, 4);
+}
+
+/** Diagnóstico desde el editor: qué modelos responden, con y sin búsqueda en Google. */
+function probarGemini() {
+  PropertiesService.getScriptProperties().deleteProperty('GEMINI_MODELOS');
+  var key = PropertiesService.getScriptProperties().getProperty('GEMINI_KEY');
+  if (!key) { aviso_('Falta GEMINI_KEY en las propiedades del script'); return; }
+  var modelos = modelosGemini_();
+  var lineas = ['Modelos: ' + modelos.join(', ')];
+  modelos.slice(0, 3).forEach(function (m) {
+    [false, true].forEach(function (buscar) {
+      var cuerpo = { contents: [{ parts: [{ text: 'Responde solo: OK' }] }] };
+      if (buscar) cuerpo.tools = [{ google_search: {} }];
+      var r = UrlFetchApp.fetch('https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(m) + ':generateContent', {
+        method: 'post', contentType: 'application/json', muteHttpExceptions: true, headers: { 'x-goog-api-key': key }, payload: JSON.stringify(cuerpo)
+      });
+      var c = r.getResponseCode();
+      lineas.push(m + (buscar ? ' + búsqueda' : '') + ': ' + (c === 200 ? 'OK' : c + ' ' + mensajeGemini_(r.getContentText())));
+    });
+  });
+  aviso_(lineas.join('\n'));
 }
