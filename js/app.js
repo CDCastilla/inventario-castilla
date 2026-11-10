@@ -5,7 +5,7 @@ import {
   unidadesSalida, normaliza, diasEntre, finCaducidad, posiblesDuplicados, parecidos, coincidenciasTexto
 } from './logica.js';
 
-const VERSION_APP = '1.6.0';
+const VERSION_APP = '1.7.0';
 const $ = (s) => document.querySelector(s);
 const vista = $('#vista');
 
@@ -594,15 +594,12 @@ VISTAS.codigoNuevo = (p) => {
       <h2>Código nuevo</h2>
       <span class="peq">${h(lec.clave)}${lec.lote ? ' · lote ' + h(lec.lote) : ''}${lec.caducidad ? ' · cad. ' + cad(lec.caducidad) : ''}</span>
     </section>
-    <section class="tarjeta suave">
-      <span>${p.fotos.length ? `${p.fotos.length} ${p.fotos.length === 1 ? 'foto' : 'fotos'} de la caja` : 'Sin foto'}</span>
-      <span class="peq">Guarda y sigue con la entrada: el nombre, la marca y la referencia se buscan solos (foto e internet) en un par de minutos. Luego solo tendrás que revisarlos.</span>
-    </section>
-    <label class="btn claro" style="display:flex;align-items:center;justify-content:center;flex-direction:row;color:var(--verde)">
-      ${p.fotos.length ? 'Añadir foto de la parte delantera' : 'Hacer foto de la caja'}
+    <label class="btn grande" style="display:flex;align-items:center;justify-content:center;flex-direction:row">
+      Hacer foto y leer la caja
       <input type="file" accept="image/*" capture="environment" id="foto" class="oculto">
     </label>
-    <button class="btn grande" id="seguir">Guardar y seguir</button>
+    <p class="peq">Haz la foto de la cara con el nombre: la app lee el texto y te dice qué producto es del catálogo.</p>
+    <button class="btn claro" id="seguir">Guardar y seguir (se identifica solo en unos minutos)</button>
     <div class="fila"><button class="btn claro" id="aMano" style="flex:1">Escribir a mano</button><button class="btn claro" id="existe" style="flex:1">Ya existe en la lista</button></div>
     <div class="lista" id="res" hidden></div>`;
   $('#foto').onchange = async (e) => {
@@ -610,7 +607,8 @@ VISTAS.codigoNuevo = (p) => {
     if (!f) return;
     const b64 = await fotoDeFichero(f);
     if (!b64) { aviso('No se pudo leer la foto'); return; }
-    p.fotos.push(b64); pintar();
+    p.fotos.push(b64);
+    ir('leerCaja', { foto: b64, intencion, lec, fotos: p.fotos.slice(-3) });
   };
   $('#seguir').onclick = () => {
     const sufijo = (lec.gtin || lec.clave).slice(-6);
@@ -662,11 +660,13 @@ VISTAS.codigoNuevo = (p) => {
 /** Producto sin código de barras: se lee el texto de la caja (Gemini) y se busca en el catálogo. */
 VISTAS.leerCaja = (p) => {
   const { foto, intencion } = p;
-  titulo('Leer la caja');
+  const codigo = p.lec && p.lec.clave ? p.lec : null;
+  const fotos = p.fotos && p.fotos.length ? p.fotos : [foto];
+  titulo(codigo ? 'Código nuevo' : 'Leer la caja');
   const pintar = () => {
     const r = p.resultado;
     const cab = `<section class="tarjeta con-mini"><span class="mini"><img src="data:image/jpeg;base64,${foto}" alt="" class="cargada"></span>
-      <span class="cuerpo">${r ? `<span class="peq">Leído en la caja</span><span class="fuerte">${h(r.nombre || 'Sin nombre claro')}</span><span class="peq">${h([r.marca, r.ref_proveedor && 'REF ' + r.ref_proveedor, r.lote && 'lote ' + r.lote, r.caducidad && 'cad. ' + cad(r.caducidad)].filter(Boolean).join(' · '))}</span>` : p.error ? `<span class="fuerte">No se ha podido leer</span><span class="peq">${h(p.error)}</span>` : '<span class="fuerte">Leyendo el texto de la caja…</span><span class="peq">Tarda unos segundos.</span>'}</span></section>`;
+      <span class="cuerpo">${codigo ? `<span class="peq">Código ${h(codigo.clave)}</span>` : ''}${r ? `<span class="peq">Leído en la caja</span><span class="fuerte">${h(r.nombre || 'Sin nombre claro')}</span><span class="peq">${h([r.marca, r.ref_proveedor && 'REF ' + r.ref_proveedor, r.lote && 'lote ' + r.lote, r.caducidad && 'cad. ' + cad(r.caducidad)].filter(Boolean).join(' · '))}</span>` : p.error ? `<span class="fuerte">No se ha podido leer</span><span class="peq">${h(p.error)}</span>` : '<span class="fuerte">Leyendo el texto de la caja…</span><span class="peq">Tarda unos segundos.</span>'}</span></section>`;
     if (!r && !p.error) { vista.innerHTML = cab; return; }
     const lista = r ? coincidenciasTexto(r, datos.productos, datos.catalogo || [], 8) : [];
     const s = st();
@@ -679,10 +679,18 @@ VISTAS.leerCaja = (p) => {
     }).join('')}</div>` : '<p class="vacio">No encuentro nada parecido en el catálogo.</p>') : '') + `
       <div class="fila"><button class="btn claro" id="aMano" style="flex:1">Buscar a mano</button>${p.error ? '<button class="btn claro" id="otraVez" style="flex:1">Reintentar</button>' : '<button class="btn claro" id="esNuevo" style="flex:1">Es nuevo: darlo de alta</button>'}</div>`;
     activarMiniaturas(vista);
-    const lec = r && (r.lote || r.caducidad) ? { clave: '', lote: r.lote || '', caducidad: r.caducidad || '' } : null;
+    const lec = codigo ? { ...codigo, lote: codigo.lote || (r && r.lote) || '', caducidad: codigo.caducidad || (r && r.caducidad) || '' }
+      : r && (r.lote || r.caducidad) ? { clave: '', lote: r.lote || '', caducidad: r.caducidad || '' } : null;
     vista.querySelectorAll('[data-pid]').forEach((b) => {
       b.onclick = () => {
         const pr = prods().get(b.dataset.pid);
+        if (pr && codigo) {
+          // El código escaneado queda enlazado: la próxima vez se reconoce al escanear.
+          encolar({ tipo: 'producto', producto: { ...pr }, codigos: [codigo.clave] });
+          datos.codigos.push({ codigo: codigo.clave, producto_id: pr.id });
+          guardar('datos', datos);
+          aviso('Código enlazado');
+        }
         if (pr && !pr.con_foto) {
           // Si el producto no tenía foto, se queda con esta.
           encolar({ tipo: 'producto', producto: { ...pr }, codigos: [], fotos: [foto], identificar: false });
@@ -691,15 +699,15 @@ VISTAS.leerCaja = (p) => {
         abrirProducto(b.dataset.pid, intencion || 'ver', lec, true);
       };
     });
-    $('#aMano').onclick = () => ir('stock', { elegir: intencion || 'ver', texto: r ? (r.marca || '') : '' }, true);
+    $('#aMano').onclick = () => (codigo ? atras() : ir('stock', { elegir: intencion || 'ver', texto: r ? (r.marca || '') : '' }, true));
     if ($('#otraVez')) $('#otraVez').onclick = () => { p.error = ''; leer(); };
-    if ($('#esNuevo')) $('#esNuevo').onclick = () => ir('ficha', { propuesta: r, lec, intencion, fotos: [foto] }, true);
+    if ($('#esNuevo')) $('#esNuevo').onclick = () => ir('ficha', { propuesta: r, lec, intencion, fotos, codigo: codigo ? codigo.clave : '' }, true);
   };
   const leer = async () => {
     p.leyendo = true;
     pintar();
     try {
-      const res = await api('identificar', { imagenes: [foto] });
+      const res = await api('identificar', { imagenes: [foto], lectura: codigo || {} });
       p.resultado = res.propuesta || {};
     } catch (e) { p.error = e.message || String(e); }
     p.leyendo = false;
