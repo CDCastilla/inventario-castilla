@@ -184,3 +184,38 @@ export function parecidos(producto, productos, n = 3) {
     .filter((x) => x.s.comun >= 2 && x.s.indice >= 0.3 && !sonVariantes(a, fichas(x.p.nombre)))
     .sort((x, y) => y.s.indice - x.s.indice).slice(0, n).map((x) => x.p);
 }
+
+/* ───────────── Buscar por el texto leído en la caja (sin código de barras) ───────────── */
+const soloAlnum = (t) => normaliza(t).replace(/[^a-z0-9]/g, '');
+
+/**
+ * Productos que encajan con lo leído en la foto de la caja ({nombre, marca, ref_proveedor}).
+ * Cuenta palabras en común con el nombre, el proveedor y las descripciones del catálogo;
+ * la referencia igual pesa mucho. Devuelve [{p, puntos, porRef}] de más a menos parecido.
+ */
+export function coincidenciasTexto(leido, productos, catalogo = [], n = 8) {
+  const q = fichas(`${leido.nombre || ''} ${leido.marca || ''}`);
+  const ref = soloAlnum(leido.ref_proveedor);
+  const textoDe = new Map(), refsDe = new Map();
+  for (const c of catalogo) {
+    textoDe.set(c.producto_id, (textoDe.get(c.producto_id) || '') + ' ' + (c.descripcion || '') + ' ' + (c.proveedor || ''));
+    if (!refsDe.has(c.producto_id)) refsDe.set(c.producto_id, []);
+    refsDe.get(c.producto_id).push(soloAlnum(c.ref));
+  }
+  const peso = (t) => (/\d/.test(t) ? 1.5 : t.length <= 2 ? 0.5 : 1);
+  const total = [...q].reduce((s, t) => s + peso(t), 0) || 1;
+  const res = [];
+  for (const p of productos) {
+    if (!p.activo) continue;
+    const f = fichas(`${p.nombre} ${p.proveedor || ''} ${textoDe.get(p.id) || ''}`);
+    let s = 0;
+    for (const t of q) if (f.has(t)) s += peso(t);
+    let puntos = s / total;
+    if (sonVariantes(q, fichas(p.nombre))) puntos *= 0.6;
+    const refs = [soloAlnum(p.ref_proveedor), ...(refsDe.get(p.id) || [])].filter((r) => r.length >= 3);
+    const porRef = ref.length >= 3 && refs.some((r) => r === ref || (ref.length >= 5 && (r.endsWith(ref) || ref.endsWith(r))));
+    if (porRef) puntos += 2;
+    if (porRef || puntos >= 0.3) res.push({ p, puntos, porRef });
+  }
+  return res.sort((a, b) => b.puntos - a.puntos || a.p.nombre.localeCompare(b.p.nombre, 'es')).slice(0, n);
+}

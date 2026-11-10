@@ -30,6 +30,8 @@
       <input id="manualTxt" placeholder="…o teclea el código" inputmode="text" autocomplete="off">
       <button class="btn">OK</button>
     </form>
+    <button class="btn claro" id="escanerTexto" style="width:100%">Sin código: leer el texto de la caja</button>
+    <input type="file" accept="image/*" capture="environment" id="escanerFotoFich" class="oculto">
     <div class="fila">
       <button class="btn claro" id="escanerBuscar">Buscar por nombre</button>
       <button class="btn claro" id="escanerCerrar">Cerrar</button>
@@ -37,6 +39,6 @@
   </div>
 </div>
 <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
-<script type="module" src="js/app.js?v=10"></script>
+<script type="module" src="js/app.js?v=11"></script>
 </body>
 </html>

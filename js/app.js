@@ -2,10 +2,10 @@
 import { leerCodigo } from './gs1.js';
 import {
   stockActual, lotesDe, totalDe, formatoCantidad, avisos, nuevoIdProducto, nuevoUuid,
-  unidadesSalida, normaliza, diasEntre, finCaducidad, posiblesDuplicados, parecidos
+  unidadesSalida, normaliza, diasEntre, finCaducidad, posiblesDuplicados, parecidos, coincidenciasTexto
 } from './logica.js';
 
-const VERSION_APP = '1.5.1';
+const VERSION_APP = '1.6.0';
 const $ = (s) => document.querySelector(s);
 const vista = $('#vista');
 
@@ -315,10 +315,27 @@ $('#manual').addEventListener('submit', (e) => {
 });
 let buscarDesdeEscaner = null;
 $('#escanerBuscar').addEventListener('click', () => { cerrarEscaner(); buscarDesdeEscaner?.(); });
+let textoDesdeEscaner = null;
+$('#escanerTexto').addEventListener('click', () => {
+  const v = $('#video');
+  const foto = flujo && v.videoWidth ? fotograma(v, 1600) : '';
+  if (!foto) { $('#escanerFotoFich').click(); return; }
+  cerrarEscaner(); navigator.vibrate?.(40);
+  textoDesdeEscaner?.(foto);
+});
+$('#escanerFotoFich').addEventListener('change', async (e) => {
+  const fich = e.target.files && e.target.files[0];
+  e.target.value = '';
+  if (!fich) return;
+  const foto = await fotoDeFichero(fich);
+  cerrarEscaner();
+  if (foto) textoDesdeEscaner?.(foto); else aviso('No se pudo leer la foto');
+});
 
 /** Escanear para encontrar un producto y abrir la vista indicada (ver / entrada / salida). */
 function escanearPara(intencion) {
   buscarDesdeEscaner = () => ir('stock', { elegir: intencion });
+  textoDesdeEscaner = (foto) => ir('leerCaja', { foto, intencion });
   abrirEscaner((raw, formato, foto) => {
     const lec = leerCodigo(raw, formato);
     const pid = codigos().get(lec.clave);
@@ -642,7 +659,56 @@ VISTAS.codigoNuevo = (p) => {
   };
 };
 
-VISTAS.ficha = ({ pid, codigo, lec, intencion, propuesta }) => {
+/** Producto sin código de barras: se lee el texto de la caja (Gemini) y se busca en el catálogo. */
+VISTAS.leerCaja = (p) => {
+  const { foto, intencion } = p;
+  titulo('Leer la caja');
+  const pintar = () => {
+    const r = p.resultado;
+    const cab = `<section class="tarjeta con-mini"><span class="mini"><img src="data:image/jpeg;base64,${foto}" alt="" class="cargada"></span>
+      <span class="cuerpo">${r ? `<span class="peq">Leído en la caja</span><span class="fuerte">${h(r.nombre || 'Sin nombre claro')}</span><span class="peq">${h([r.marca, r.ref_proveedor && 'REF ' + r.ref_proveedor, r.lote && 'lote ' + r.lote, r.caducidad && 'cad. ' + cad(r.caducidad)].filter(Boolean).join(' · '))}</span>` : p.error ? `<span class="fuerte">No se ha podido leer</span><span class="peq">${h(p.error)}</span>` : '<span class="fuerte">Leyendo el texto de la caja…</span><span class="peq">Tarda unos segundos.</span>'}</span></section>`;
+    if (!r && !p.error) { vista.innerHTML = cab; return; }
+    const lista = r ? coincidenciasTexto(r, datos.productos, datos.catalogo || [], 8) : [];
+    const s = st();
+    vista.innerHTML = cab + (r ? (lista.length ? `<h2 class="sub">¿Es alguno de estos?</h2><div class="lista">${lista.map(({ p: pr, porRef }) => {
+      const refs = (datos.catalogo || []).filter((c) => c.producto_id === pr.id).map((c) => [String(c.proveedor || '').replace(/\s*\(.*\)\s*$/, ''), c.ref].filter(Boolean).join(' '));
+      const deps = [...new Set(refs.length ? refs : [[pr.proveedor, pr.ref_proveedor].filter(Boolean).join(' ')])].filter(Boolean);
+      return `<button class="tarjeta item con-mini" data-pid="${h(pr.id)}">${cajaMini(pr)}<span class="cuerpo">
+        <span class="entre"><span class="fuerte">${h(pr.nombre)}</span><span class="cifra">${h(formatoCantidad(totalDe(s, pr.id), pr))}</span></span>
+        ${deps.length ? `<span class="peq ref-lista">${deps.map(h).join('<br>')}</span>` : ''}${porRef ? '<span class="peq"><span class="chip">misma referencia</span></span>' : ''}</span></button>`;
+    }).join('')}</div>` : '<p class="vacio">No encuentro nada parecido en el catálogo.</p>') : '') + `
+      <div class="fila"><button class="btn claro" id="aMano" style="flex:1">Buscar a mano</button>${p.error ? '<button class="btn claro" id="otraVez" style="flex:1">Reintentar</button>' : '<button class="btn claro" id="esNuevo" style="flex:1">Es nuevo: darlo de alta</button>'}</div>`;
+    activarMiniaturas(vista);
+    const lec = r && (r.lote || r.caducidad) ? { clave: '', lote: r.lote || '', caducidad: r.caducidad || '' } : null;
+    vista.querySelectorAll('[data-pid]').forEach((b) => {
+      b.onclick = () => {
+        const pr = prods().get(b.dataset.pid);
+        if (pr && !pr.con_foto) {
+          // Si el producto no tenía foto, se queda con esta.
+          encolar({ tipo: 'producto', producto: { ...pr }, codigos: [], fotos: [foto], identificar: false });
+          guardarFotoLocal(pr.id, foto); pr._fotoLocal = true; pr.con_foto = true; guardar('datos', datos);
+        }
+        abrirProducto(b.dataset.pid, intencion || 'ver', lec, true);
+      };
+    });
+    $('#aMano').onclick = () => ir('stock', { elegir: intencion || 'ver', texto: r ? (r.marca || '') : '' }, true);
+    if ($('#otraVez')) $('#otraVez').onclick = () => { p.error = ''; leer(); };
+    if ($('#esNuevo')) $('#esNuevo').onclick = () => ir('ficha', { propuesta: r, lec, intencion, fotos: [foto] }, true);
+  };
+  const leer = async () => {
+    p.leyendo = true;
+    pintar();
+    try {
+      const res = await api('identificar', { imagenes: [foto] });
+      p.resultado = res.propuesta || {};
+    } catch (e) { p.error = e.message || String(e); }
+    p.leyendo = false;
+    if (pila[pila.length - 1]?.params === p) pintar();
+  };
+  if (p.resultado || p.error || p.leyendo) pintar(); else leer();
+};
+
+VISTAS.ficha = ({ pid, codigo, lec, intencion, propuesta, fotos }) => {
   const existente = pid ? prods().get(pid) : null;
   titulo(existente ? 'Editar ficha' : 'Nuevo producto');
   const cats = datos.config.categoria || [];
@@ -715,7 +781,9 @@ VISTAS.ficha = ({ pid, codigo, lec, intencion, propuesta }) => {
     };
     if (!prod.nombre) { aviso('Falta el nombre'); return; }
     if (prod.armario) guardar('ultimoArmario', prod.armario);
-    encolar({ tipo: 'producto', producto: prod, codigos: nuevos });
+    const fotosNuevas = !existente && fotos && fotos.length ? fotos.slice(-3) : [];
+    encolar({ tipo: 'producto', producto: prod, codigos: nuevos, ...(fotosNuevas.length ? { fotos: fotosNuevas, identificar: false } : {}) });
+    if (fotosNuevas.length) { guardarFotoLocal(prod.id, fotosNuevas[fotosNuevas.length - 1]); prod.con_foto = true; }
     // Copia local inmediata (funciona sin conexión).
     const i = datos.productos.findIndex((x) => x.id === prod.id);
     if (i >= 0) datos.productos[i] = prod; else datos.productos.push(prod);

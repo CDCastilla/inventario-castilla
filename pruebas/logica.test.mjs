@@ -89,3 +89,22 @@ test('posibles duplicados: nombre parecido, misma referencia y descartes', () =>
   assert.ok(!r2.map((x) => [x.a.id, x.b.id].sort().join('')).includes('AB'));
   assert.deepEqual(parecidos(ps[0], ps).map((p) => p.id), ['B']);
 });
+
+test('coincidenciasTexto: busca por lo leído en la caja (nombre, marca y referencia)', async () => {
+  const { coincidenciasTexto } = await import('../js/logica.js');
+  const productos = [
+    { id: 'A', nombre: 'Colgate duraphat barniz 10 ml', proveedor: 'Broker Dental', ref_proveedor: '091-0533', activo: true },
+    { id: 'B', nombre: 'Guantes de Nitrilo sin Polvo 100 uds S', proveedor: 'Bestdent', activo: true },
+    { id: 'C', nombre: 'Guantes de Nitrilo sin Polvo 100 uds M', proveedor: 'Bestdent', activo: true },
+    { id: 'D', nombre: 'Elite HD+ light rápida', proveedor: 'Proclinic', ref_proveedor: '4376', activo: true },
+    { id: 'E', nombre: 'Producto retirado duraphat', activo: false }
+  ];
+  const catalogo = [{ producto_id: 'A', proveedor: 'Dentaltix', ref: '09VA019', descripcion: 'Duraphat: Barniz de Flúor Desensibilizante' }];
+  const r1 = coincidenciasTexto({ nombre: 'Duraphat barniz de flúor', marca: 'Colgate' }, productos, catalogo);
+  assert.equal(r1[0].p.id, 'A');
+  assert.ok(!r1.some((x) => x.p.id === 'E'));
+  const r2 = coincidenciasTexto({ nombre: 'Guantes nitrilo talla M', marca: 'Bestdent' }, productos, catalogo);
+  assert.equal(r2[0].p.id, 'C');
+  const r3 = coincidenciasTexto({ nombre: 'Silicona', marca: 'Zhermack', ref_proveedor: '09-VA-019' }, productos, catalogo);
+  assert.equal(r3[0].p.id, 'A'); assert.ok(r3[0].porRef);
+});
