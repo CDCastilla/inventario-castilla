@@ -5,7 +5,7 @@ import {
   unidadesSalida, normaliza, diasEntre, finCaducidad, posiblesDuplicados, parecidos, coincidenciasTexto, leerPedido, proveedorProbable, emparejarPedido
 } from './logica.js';
 
-const VERSION_APP = '1.8.0';
+const VERSION_APP = '1.8.1';
 const $ = (s) => document.querySelector(s);
 const vista = $('#vista');
 
@@ -1070,7 +1070,7 @@ VISTAS.pedidoPegar = (p) => {
       const r = leerPedido(p.texto);
       if (!r.lineas.length) { aviso('No encuentro líneas con «Referencia»: copia la página entera del pedido'); return; }
       p.numero = r.numero; p.fecha = r.fecha || hoy();
-      p.proveedor = proveedorProbable(r.lineas, datos.catalogo || []) || leer('ultimoProveedorPedido', '');
+      p.proveedor = proveedorProbable(r.lineas, datos.catalogo || [], p.texto) || leer('ultimoProveedorPedido', '');
       p.base = r.lineas;
       p.lineas = emparejarPedido(r.lineas, p.proveedor, datos.productos, datos.catalogo || []);
       pintar();
@@ -1084,7 +1084,7 @@ VISTAS.pedidoPegar = (p) => {
   const repetido = (datos.pedidos || []).find((x) => x.numero && x.numero === p.numero && x.proveedor === p.proveedor);
   vista.innerHTML = `
     <section class="tarjeta"><div class="campos">
-      <label>Depósito<input id="prov" list="provsP" value="${h(p.proveedor)}"><datalist id="provsP">${provs.map((x) => `<option value="${h(x)}">`).join('')}</datalist></label>
+      <label>Depósito ${p.proveedor ? '<span class="peq">(detectado; cámbialo si no es)</span>' : ''}<input id="prov" list="provsP" value="${h(p.proveedor)}" placeholder="Escribe o elige el depósito"><datalist id="provsP">${provs.map((x) => `<option value="${h(x)}">`).join('')}</datalist></label>
       <div class="fila"><label style="flex:1">Nº de pedido<input id="num" value="${h(p.numero || '')}"></label><label style="flex:1">Fecha<input id="fec" type="date" value="${h(p.fecha)}"></label></div>
     </div></section>
     ${repetido ? '<p class="nota info">Este pedido ya está en la app: al guardar se actualiza (no se duplica).</p>' : ''}
@@ -1093,6 +1093,8 @@ VISTAS.pedidoPegar = (p) => {
       const pr = l.producto_id ? pm.get(l.producto_id) : null;
       const cab = `<span class="fuerte">${h(l.descripcion)}</span><span class="peq">REF ${h(l.ref)} · ${l.cantidad} ${l.cantidad === 1 ? 'envase' : 'envases'} · ${euros(l.precio)}</span>`;
       if (pr) return `<div class="tarjeta">${cab}<span class="peq"><span class="chip">${l.estado === 'ref' ? 'En el catálogo' : 'Elegido'}</span> ${l.estado === 'ref' && normaliza(pr.nombre) === normaliza(l.descripcion) ? '' : '→ ' + h(pr.nombre)}</span>${l.estado !== 'ref' ? `<button class="btn claro" data-quitar="${i}">No es este: producto nuevo</button>` : ''}</div>`;
+      const antes = p.lineas.slice(0, i).findIndex((x) => x.ref && x.ref.toUpperCase() === l.ref.toUpperCase());
+      if (antes >= 0) return `<div class="tarjeta">${cab}<span class="peq"><span class="chip gris">Mismo producto que la línea ${antes + 1}</span>${l.precio === 0 ? ' · sin cargo' : ''}</span></div>`;
       const sug = l.sugerencias.map((id) => pm.get(id)).filter(Boolean).slice(0, 3);
       return `<div class="tarjeta">${cab}<span class="peq"><span class="chip ${sug.length ? 'aviso' : 'gris'}">Nuevo: se dará de alta</span></span>
         ${sug.length ? `<span class="peq">¿Es alguno de estos?</span>${sug.map((x) => `<button class="btn claro" data-elegir="${i}" data-pid="${h(x.id)}" style="text-align:left">Sí: ${h(x.nombre)}${(datos.catalogo || []).filter((c) => c.producto_id === x.id).slice(0, 2).map((c) => ' · ' + h(corto(c.proveedor)) + ' ' + h(c.ref)).join('')}</button>`).join('')}` : ''}</div>`;
@@ -1114,8 +1116,9 @@ VISTAS.pedidoPegar = (p) => {
     if (!p.numero && !confirm('El pedido no tiene número. ¿Guardarlo igualmente?')) return;
     guardar('ultimoProveedorPedido', p.proveedor);
     const id = repetido ? repetido.id : 'PD-' + nuevoUuid().slice(0, 8).toUpperCase();
+    const nuevosPorRef = new Map();
     const lineas = p.lineas.map((l) => {
-      let pid = l.producto_id;
+      let pid = l.producto_id || nuevosPorRef.get(l.ref.toUpperCase());
       if (!pid) {
         const prod = {
           id: nuevoIdProducto(), nombre: l.descripcion.slice(0, 120), categoria: '', armario: '', proveedor: p.proveedor, ref_proveedor: l.ref,
@@ -1124,6 +1127,7 @@ VISTAS.pedidoPegar = (p) => {
         encolar({ tipo: 'producto', producto: prod, codigos: [] });
         datos.productos.push(prod);
         pid = prod.id;
+        nuevosPorRef.set(l.ref.toUpperCase(), pid); // la misma referencia repetida (p. ej. una unidad de regalo) es el mismo producto
       }
       if (!(datos.catalogo || []).some((c) => c.proveedor === p.proveedor && c.ref === l.ref)) (datos.catalogo = datos.catalogo || []).push({ proveedor: p.proveedor, ref: l.ref, descripcion: l.descripcion, precio: l.precio, fecha: p.fecha, producto_id: pid });
       return { linea: l.linea, producto_id: pid, ref: l.ref, descripcion: l.descripcion, cantidad: l.cantidad, precio: l.precio, iva: l.iva };

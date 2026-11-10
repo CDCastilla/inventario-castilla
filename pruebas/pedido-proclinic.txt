@@ -1,0 +1,121 @@
+Pedidos realizados / Detalle de pedido
+A continuación te mostramos el detalle de tu pedido.
+Fecha del pedido
+10-11-2026
+Número del pedido
+0075263712
+Método de envío
+ChronoExpress
+Dirección de facturación
+CASTILLA MARCOS SANTOS,SLU
+GREDOS,10,LOCAL
+05002 AVILA
+Dirección de envío
+CASTILLA MARCOS SANTOS,SLU
+GREDOS,10,LOCAL
+05002 AVILA
+Ref.
+Descripción
+Unidades
+Precio unitario
+Descuento aplicado ud.
+Precio ud. con dto.
+Importe sin IVA
+IVA
+26800
+CEPILLOS NYLON (100u.) BESTDENT
+1
+58,25 €
+71.00%
+16,95 €
+16,95 €
+21.00%
+35211
+ESPONJA HEMOSTATICA 40u. PROCLINIC
+1
+44,07 €
+46.00%
+23,76 €
+23,76 €
+10.00%
+83059
+STERIGUT INDICADOR QUIMICO (250u.dobles)
+2
+19,97 €
+40.00%
+11,95 €
+23,90 €
+21.00%
+01951
+PAPEL ARTICULAR AZUL 200μm 300u BESTDENT
+1
+19,76 €
+60.00%
+7,99 €
+7,99 €
+21.00%
+0122A
+ASPIR. AZULES 15cm. (100u.) PROCLINIC
+3
+6,43 €
+70.00%
+1,90 €
+5,70 €
+21.00%
+0122A
+ASPIR. AZULES 15cm. (100u.) PROCLINIC
+1
+6,43 €
+100.00%
+0,00 €
+0,00 €
+%
+76902
+SERVILLETA-BABERO AZULES (500u) BESTDENT
+1
+30,51 €
+58.00%
+12,70 €
+12,70 €
+21.00%
+23655
+GUANTE LATEX S/POLVO BLANCO M BESTDENT
+6
+9,95 €
+72.00%
+2,80 €
+16,80 €
+21.00%
+23656
+GUANTE LATEX S/POLVO BLANCO S BESTDENT
+3
+9,95 €
+72.00%
+2,80 €
+8,40 €
+21.00%
+23657
+GUANTE LATEX S/POLVO BLANCO XS BESTDENT
+8
+9,95 €
+72.00%
+2,80 €
+22,40 €
+21.00%
+6562
+OPTRAGATE 3D REGULAR REPOS. 80u -590850-
+1
+142,00 €
+34.00%
+93,84 €
+93,84 €
+21.00%
+Resumen de tu pedido
+Subtotal
+232,44 €
+Gastos envío
+0,00 €
+Total impuesto IVA
+46,20 €
+Importe total
+278,64 €

@@ -224,32 +224,50 @@ export function coincidenciasTexto(leido, productos, catalogo = [], n = 8) {
 const CABECERAS_PEDIDO = /^(precio( unitario)?|cantidad|iva|total|subtotal|repetir pedido|en preparaci[oó]n:?|enviado:?|entregado:?|pendiente:?|producto|art[ií]culo|descripci[oó]n)$/i;
 const numeroEs = (t) => Number(String(t).replace(/\./g, '').replace(',', '.'));
 
+/** Fecha dd/mm/aaaa, dd-mm-aaaa o dd.mm.aaaa → aaaa-mm-dd. */
+const fechaPedido = (t) => { const m = String(t).match(/(\d{1,2})[/.-](\d{1,2})[/.-](\d{4})/); return m ? `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}` : ''; };
+const FIN_PEDIDO = /^(otros servicios|resumen( de tu pedido)?|subtotal|base imponible|total|importe total|gastos( de)? env[ií]o|observaciones)\b/i;
+
 /**
- * Lee el texto copiado de un pedido (formato tipo Dentaltix: descripción, «Referencia:», precio, «2u.», IVA).
- * Ignora «Otros servicios» (portes, catálogos). Devuelve {numero, fecha, lineas:[{linea, descripcion, ref, precio, cantidad, iva}]}.
+ * Lee el texto copiado de la página de un pedido. Formatos:
+ *  - en bloques (Dentaltix): descripción / «Referencia: X» / precio / «2u.» / IVA;
+ *  - en tabla (Proclinic y similares): cabeceras «Ref. / Descripción / Unidades / Precio… / IVA» y una fila por producto.
+ * Ignora portes, catálogos y resúmenes. Devuelve {numero, fecha, formato, lineas:[{linea, descripcion, ref, precio, cantidad, iva}]}.
  */
 export function leerPedido(texto) {
   const filas = String(texto || '').replace(/\r/g, '').split(/\n|\t/).map((x) => x.replace(/\s+/g, ' ').trim()).filter(Boolean);
   let numero = '', fecha = '';
+  for (let i = 0; i < filas.length; i++) {
+    const f = filas[i], sig = filas[i + 1] || '';
+    let m;
+    if (!numero && (m = f.match(/^(?:n[uú]mero( del)? pedido|pedido\s*(?:n[ºo.]*)?)\s*:?\s*([A-Z0-9-]{4,})?$/i))) {
+      if (m[2]) numero = m[2]; else if (/^[A-Z0-9-]{4,}$/i.test(sig)) numero = sig;
+    }
+    if (!fecha && /^fecha( del pedido)?\s*:?/i.test(f)) fecha = fechaPedido(f) || fechaPedido(sig);
+  }
+  const lineas = filas.some((f) => /^ref(?:erencia)?\.?\s*:\s*\S/i.test(f)) ? pedidoEnBloques(filas) : pedidoEnTabla(filas);
+  return { numero, fecha, formato: lineas.formato, lineas: [...lineas] };
+}
+
+function pedidoEnBloques(filas) {
   const lineas = [];
   let desc = [];
   for (let i = 0; i < filas.length; i++) {
     const f = filas[i];
     if (/^otros servicios/i.test(f)) break;
     let m;
-    if (!numero && (m = f.match(/^pedido\s*(?:n[ºo.]*\s*)?:?\s*([A-Z0-9-]{4,})$/i))) { numero = m[1]; desc = []; continue; }
-    if (!fecha && (m = f.match(/^fecha\s*:?\s*(\d{1,2})[/.-](\d{1,2})[/.-](\d{4})/i))) { fecha = `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`; desc = []; continue; }
+    if (/^(pedido|fecha|n[uú]mero)\b/i.test(f)) { desc = []; continue; }
     if ((m = f.match(/^ref(?:erencia)?\.?\s*:?\s*(\S.*)$/i))) {
       const l = { linea: lineas.length + 1, descripcion: desc.join(' ').slice(0, 200), ref: m[1].trim(), precio: 0, cantidad: 1, iva: '' };
+      let conPrecio = false;
       for (let j = i + 1; j < Math.min(filas.length, i + 6); j++) {
         const g = filas[j];
         let k;
-        if ((k = g.match(/^(-?[\d.]+,\d{1,2})\s*€$/)) && !l._precio) { l.precio = numeroEs(k[1]); l._precio = true; i = j; continue; }
+        if ((k = g.match(/^(-?[\d.]+,\d{1,2})\s*€$/)) && !conPrecio) { l.precio = numeroEs(k[1]); conPrecio = true; i = j; continue; }
         if ((k = g.match(/^(\d+(?:,\d+)?)\s*(?:u|ud|uds|unid\.?|unidades)\.?$/i))) { l.cantidad = numeroEs(k[1]); i = j; continue; }
         if ((k = g.match(/^(\d{1,2})\s*%$/))) { l.iva = k[1]; i = j; continue; }
         break;
       }
-      delete l._precio;
       if (l.descripcion) lineas.push(l);
       desc = [];
       continue;
@@ -258,17 +276,73 @@ export function leerPedido(texto) {
     desc.push(f);
     if (desc.length > 3) desc.shift();
   }
-  return { numero, fecha, lineas };
+  lineas.formato = 'bloques';
+  return lineas;
 }
 
-const refNorm = (r) => String(r || '').toUpperCase().replace(/\s+/g, '');
+const COLUMNAS = [
+  ['ref', /^(ref\.?|referencia|c[oó]d(igo|\.)?|cod\.? art[ií]culo)$/i],
+  ['descripcion', /^(descripci[oó]n|producto|art[ií]culo|nombre|concepto)$/i],
+  ['cantidad', /^(unidades|cantidad|uds\.?|cant\.?|unid\.?)$/i],
+  ['precio_dto', /(con dto|neto|precio final)/i],
+  ['importe', /^(importe|total)/i],
+  ['dto', /^(descuento|dto\.?|% ?dto)/i],
+  ['precio', /^(precio|p\.? ?unit)/i],
+  ['iva', /^(iva|% ?iva|impuesto)/i]
+];
+const columna = (t) => (COLUMNAS.find(([, re]) => re.test(t)) || [])[0];
+
+function pedidoEnTabla(filas) {
+  const lineas = [];
+  lineas.formato = 'tabla';
+  // Cabecera: varias filas seguidas que son nombres de columna, con al menos referencia o descripción y cantidad.
+  let ini = -1, cols = [];
+  for (let i = 0; i < filas.length && ini < 0; i++) {
+    const c = [];
+    for (let j = i; j < filas.length && columna(filas[j]); j++) c.push(columna(filas[j]));
+    if (c.length >= 3 && c.includes('cantidad') && (c.includes('ref') || c.includes('descripcion'))) { ini = i + c.length; cols = c; }
+  }
+  if (ini < 0) return lineas;
+  const n = cols.length;
+  const iCant = cols.indexOf('cantidad');
+  const iPrecio = cols.includes('precio_dto') ? cols.indexOf('precio_dto') : cols.indexOf('precio');
+  const esNum = (t) => /^-?[\d.]*\d(,\d+)?$/.test(String(t).trim());
+  let i = ini, saltos = 0;
+  while (i + n <= filas.length && !FIN_PEDIDO.test(filas[i])) {
+    const g = filas.slice(i, i + n);
+    const valida = esNum(g[iCant]) && (iPrecio < 0 || /\d/.test(g[iPrecio])) && !FIN_PEDIDO.test(g[n - 1]);
+    if (!valida) { if (++saltos > 20) break; i++; continue; }  // fila descuadrada (celda vacía): se busca la siguiente
+    const v = (k) => { const x = cols.indexOf(k); return x < 0 ? '' : g[x]; };
+    const ref = v('ref'), descripcion = v('descripcion') || ref;
+    if (/^(portes?|gastos|shipping)/i.test(descripcion)) { i += n; continue; }
+    lineas.push({
+      linea: lineas.length + 1, descripcion: descripcion.slice(0, 200), ref,
+      precio: iPrecio >= 0 ? numeroEs(g[iPrecio].replace(/[^\d.,-]/g, '')) || 0 : 0,
+      cantidad: numeroEs(g[iCant]), iva: (v('iva').match(/^(\d{1,2})/) || [])[1] || ''
+    });
+    i += n;
+  }
+  return lineas;
+}
+
+const refNorm = (r) => String(r || '').toUpperCase().replace(/\s+/g, '').replace(/^0+(?=.)/, '');
 
 /** Depósito al que más se parecen las referencias del pedido (según el catálogo). */
-export function proveedorProbable(lineas, catalogo = []) {
+export function proveedorProbable(lineas, catalogo = [], texto = '') {
   const refs = new Set(lineas.map((l) => refNorm(l.ref)));
   const n = new Map();
   for (const c of catalogo) if (refs.has(refNorm(c.ref))) n.set(c.proveedor, (n.get(c.proveedor) || 0) + 1);
-  return [...n.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || '';
+  const porRef = [...n.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
+  if (porRef) return porRef;
+  // Sin referencias conocidas: el depósito cuyo nombre aparece más veces en el texto.
+  const t = normaliza(texto);
+  let mejor = '', veces = 0;
+  for (const prov of new Set(catalogo.map((c) => c.proveedor))) {
+    const palabra = normaliza(prov).split(/[^a-z0-9]+/).find((w) => w.length >= 4);
+    const k = palabra ? t.split(palabra).length - 1 : 0;
+    if (k > veces) { veces = k; mejor = prov; }
+  }
+  return mejor;
 }
 
 /**
@@ -281,11 +355,16 @@ export function emparejarPedido(lineas, proveedor, productos, catalogo = []) {
   const prov = normaliza(proveedor).trim();
   for (const c of catalogo) if (normaliza(c.proveedor).trim() === prov && activos.has(c.producto_id)) porRef.set(refNorm(c.ref), c.producto_id);
   for (const p of activos.values()) if (p.ref_proveedor && (!p.proveedor || normaliza(p.proveedor).trim() === prov)) porRefFicha.set(refNorm(p.ref_proveedor), p.id);
+  const provPalabras = fichas(proveedor);
   return lineas.map((l) => {
     const r = refNorm(l.ref);
     const pid = porRef.get(r) || porRefFicha.get(r);
     if (pid) return { ...l, producto_id: pid, estado: 'ref', sugerencias: [] };
-    const sug = coincidenciasTexto({ nombre: l.descripcion }, [...activos.values()], catalogo, 5).filter((x) => x.puntos >= 0.35).map((x) => x.p.id);
+    // El nombre del depósito (que va en muchas descripciones) no cuenta como parecido.
+    const desc = [...fichas(l.descripcion)].filter((t) => !provPalabras.has(t)).join(' ');
+    const clave = [...fichas(desc)].filter((t) => !/\d/.test(t) && t.length >= 4);
+    const sug = coincidenciasTexto({ nombre: desc }, [...activos.values()], catalogo, 8)
+      .filter((x) => x.puntos >= 0.4 && clave.some((t) => fichas(x.p.nombre).has(t))).slice(0, 5).map((x) => x.p.id);
     return { ...l, producto_id: '', estado: sug.length ? 'parecido' : 'nuevo', sugerencias: sug };
   });
 }

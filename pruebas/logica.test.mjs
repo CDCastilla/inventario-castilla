@@ -144,3 +144,28 @@ test('leerPedido: pedido pegado de Dentaltix', async () => {
   assert.equal(e[8].estado, 'parecido'); assert.equal(e[8].producto_id, ''); // Menta: se sugiere, no se da por hecho
   assert.deepEqual(e[8].sugerencias, ['PB']);
 });
+
+test('leerPedido: pedido en tabla de Proclinic (con descuentos, regalo y referencias con ceros)', async () => {
+  const { leerPedido, proveedorProbable, emparejarPedido } = await import('../js/logica.js');
+  const { readFileSync } = await import('node:fs');
+  const txt = readFileSync(new URL('./pedido-proclinic.txt', import.meta.url), 'utf8');
+  const p = leerPedido(txt);
+  assert.equal(p.numero, '0075263712');
+  assert.equal(p.fecha, '2026-11-10');
+  assert.equal(p.formato, 'tabla');
+  assert.equal(p.lineas.length, 11);
+  assert.deepEqual(p.lineas[2], { linea: 3, descripcion: 'STERIGUT INDICADOR QUIMICO (250u.dobles)', ref: '83059', precio: 11.95, cantidad: 2, iva: '21' });
+  assert.equal(p.lineas[5].precio, 0); assert.equal(p.lineas[5].iva, ''); // la unidad de regalo
+  assert.equal(p.lineas[10].precio, 93.84);
+  // Copiado como tabla (tabuladores) da lo mismo
+  const tab = txt.split('\n').join('\t');
+  assert.equal(leerPedido(tab).lineas.length, 11);
+  // Sin referencias conocidas, el depósito sale del texto
+  const cat = [{ proveedor: 'Proclinic', ref: 'X' }, { proveedor: 'Dentaltix (Dentared)', ref: 'Y' }];
+  assert.equal(proveedorProbable(p.lineas, cat, txt), 'Proclinic');
+  // Ref con cero delante = la misma ref; el nombre del depósito no cuenta como parecido
+  const productos = [{ id: 'PA', nombre: 'Papel articular azul 200 micras', activo: true }, { id: 'CE', nombre: 'CEPILLOS NYLON (100u.) BESTDENT', activo: true }];
+  const e = emparejarPedido(p.lineas, 'Proclinic', productos, [{ proveedor: 'Proclinic', ref: '1951', producto_id: 'PA' }]);
+  assert.equal(e[3].producto_id, 'PA');
+  assert.equal(e[4].estado, 'nuevo');
+});
