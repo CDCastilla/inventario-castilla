@@ -49,7 +49,7 @@ function crearEntorno() {
     Logger: { log() {} },
     ScriptApp: {
       getProjectTriggers: () => disparadores.map((d) => ({ getHandlerFunction: () => d })),
-      newTrigger: (f) => { const t = { timeBased: () => t, onWeekDay: () => t, atHour: () => t, inTimezone: () => t, after: () => t, everyMinutes: () => t, create: () => { disparadores.push(f); return t; } }; return t; },
+      newTrigger: (f) => { const t = { timeBased: () => t, onWeekDay: () => t, atHour: () => t, inTimezone: () => t, after: () => t, everyMinutes: () => t, everyHours: () => t, create: () => { disparadores.push(f); return t; } }; return t; },
       deleteTrigger: (t) => { const i = disparadores.indexOf(t.getHandlerFunction()); if (i >= 0) disparadores.splice(i, 1); },
       WeekDay: { MONDAY: 1 }
     },
@@ -202,7 +202,7 @@ test('alta sin esperar: foto a Drive, pendiente, identificación en segundo plan
   assert.equal(r.productos[0].estado_ia, 'pendiente');
   assert.equal(ficheros.size, 1);
   assert.ok(disparadores.includes('identificarAhora'));
-  assert.ok(disparadores.includes('identificarPendientes'));
+  assert.ok(disparadores.includes('identificarPeriodico'));
 
   let cuerpo;
   ctx.__fetch = (url, opt) => {
@@ -328,7 +328,7 @@ test('imágenes de internet: busca, comprueba que es imagen y la guarda como fot
       return { getResponseCode: () => 200, getContentText: () => JSON.stringify({ candidates: [{ content: { parts: [{ text: t }] } }] }) };
     }
     if (url === 'https://angelus.com/mta.jpg') return { getResponseCode: () => 200, getHeaders: () => ({ 'Content-Type': 'image/jpeg' }), getBlob: () => ({ getBytes: () => [...jpg].map((b) => (b > 127 ? b - 256 : b)) }) };
-    return { getResponseCode: () => 404, getHeaders: () => ({}), getBlob: () => ({ getBytes: () => [] }) };
+    return { getResponseCode: () => 404, getHeaders: () => ({}), getContentText: () => '', getBlob: () => ({ getBytes: () => [] }) };
   };
   ctx.identificarPendientes();
   let r = llamar({ accion: 'estado' });
@@ -339,4 +339,31 @@ test('imágenes de internet: busca, comprueba que es imagen y la guarda como fot
   ctx.identificarPendientes();
   const fila = ctx.filas_('PRODUCTOS').find((p) => p.id === 'P-IMG00002');
   assert.equal(fila.img_estado, 'no');
+  // Volver a buscar las no encontradas
+  ctx.reintentarImagenes();
+  assert.equal(ctx.filas_('PRODUCTOS').find((p) => p.id === 'P-IMG00002').img_estado, '');
+});
+
+test('imágenes: si Gemini falla por cuota no se marca nada y se guarda el error; og:image de las páginas de la búsqueda', () => {
+  const { ctx, props, llamar } = crearEntorno();
+  props.GEMINI_KEY = 'k';
+  llamar({ accion: 'enviar', ops: [{ tipo: 'producto', op_id: '1', producto: { id: 'P-IMG00003', nombre: 'Eugenol 20 ml', uds_envase: 1, modo: 'unidades' }, codigos: [] }] });
+  ctx.__fetch = () => ({ getResponseCode: () => 429, getContentText: () => 'quota' });
+  ctx.identificarPendientes();
+  assert.equal(ctx.filas_('PRODUCTOS')[0].img_estado, '');
+  assert.match(props.ULTIMO_ERROR_IMG, /429/);
+  let r = llamar({ accion: 'estado' });
+  assert.equal(r.imagenes.pendientes, 1);
+  const jpg = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff]), Buffer.alloc(5000, 1)]);
+  ctx.__fetch = (url) => {
+    if (url.includes('generativelanguage')) return { getResponseCode: () => 200, getContentText: () => JSON.stringify({ candidates: [{ content: { parts: [{ text: '{"pagina":"","imagen":""}' }] }, groundingMetadata: { groundingChunks: [{ web: { uri: 'https://redir/1' } }] } }] }) };
+    if (url === 'https://redir/1') return { getResponseCode: () => 200, getContentText: () => '<html><head><meta property="og:image" content="https://tienda.com/eugenol.jpg"></head></html>', getHeaders: () => ({}) };
+    if (url === 'https://tienda.com/eugenol.jpg') return { getResponseCode: () => 200, getHeaders: () => ({ 'Content-Type': 'image/jpeg' }), getBlob: () => ({ getBytes: () => [...jpg].map((b) => (b > 127 ? b - 256 : b)) }) };
+    return { getResponseCode: () => 404, getHeaders: () => ({}), getContentText: () => '', getBlob: () => ({ getBytes: () => [] }) };
+  };
+  ctx.identificarPendientes();
+  r = llamar({ accion: 'estado' });
+  assert.equal(r.productos[0].con_foto, true);
+  assert.ok(r.productos[0].foto_v);
+  assert.equal(r.imagenes.conFoto, 1);
 });

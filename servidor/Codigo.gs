@@ -13,7 +13,7 @@
  *  - Editar la ficha de un producto nunca mueve stock.
  */
 
-var VERSION_SERVIDOR = '1.4.0';
+var VERSION_SERVIDOR = '1.5.0';
 
 var HOJAS = {
   PRODUCTOS: ['id', 'nombre', 'categoria', 'proveedor', 'ref_proveedor', 'uds_envase', 'modo', 'lote', 'armario', 'minimo', 'activo', 'notas', 'actualizado', 'foto', 'estado_ia', 'intentos_ia', 'img_estado', 'fusionado_en'],
@@ -63,7 +63,8 @@ function onOpen() {
     .addItem('Recalcular hoja STOCK', 'recalcularStock')
     .addItem('Hacer copia de seguridad ahora', 'copiaSeguridad')
     .addItem('Cargar catálogo (pestaña CATALOGO_IMPORTAR)', 'cargarCatalogo')
-    .addItem('Buscar imágenes e identificar ahora', 'identificarPendientes')
+    .addItem('Buscar imágenes ahora (5 min)', 'buscarImagenesAhora')
+    .addItem('Volver a buscar imágenes no encontradas', 'reintentarImagenes')
     .addToUi();
 }
 
@@ -131,7 +132,14 @@ function doPost(e) {
   var clave = PropertiesService.getScriptProperties().getProperty('CLAVE');
   if (!clave || pet.clave !== clave) return json_({ ok: false, error: 'Clave incorrecta' });
   try {
-    if (pet.accion === 'estado') return json_(conVersion_(leerEstado_()));
+    if (pet.accion === 'estado') {
+      // Autocuración: si falta el disparador periódico (p. ej. no se ejecutó configurar), se crea.
+      try {
+        if (PropertiesService.getScriptProperties().getProperty('GEMINI_KEY') &&
+          !ScriptApp.getProjectTriggers().some(function (t) { return t.getHandlerFunction() === 'identificarPeriodico'; })) programarIdentificacion_(true);
+      } catch (e) { Logger.log('Disparador: ' + e); }
+      return json_(conVersion_(leerEstado_()));
+    }
     if (pet.accion === 'enviar') return json_(conVersion_(procesarOps_(pet.ops || [])));
     if (pet.accion === 'exportar') return json_(conVersion_(exportarXlsx_()));
     if (pet.accion === 'identificar') return json_(conVersion_(identificar_(pet)));
@@ -174,7 +182,7 @@ function producto_(o) {
     uds_envase: Number(o.uds_envase) || 1, modo: o.modo === 'abrir' ? 'abrir' : 'unidades',
     lote: o.lote === 'SI', armario: o.armario, minimo: Number(o.minimo) || 0,
     activo: o.activo !== 'NO' && !o.fusionado_en, notas: o.notas, estado_ia: o.estado_ia || '', con_foto: !!o.foto,
-    fusionado_en: o.fusionado_en || ''
+    fusionado_en: o.fusionado_en || '', foto_v: o.foto ? String(o.foto).split(',')[0].slice(-10) : ''
   };
 }
 
@@ -251,6 +259,7 @@ function leerEstado_() {
     reposiciones: Object.keys(repos).map(function (k) { return repos[k]; }),
     movimientos: ultimos,
     ultimaCopia: PropertiesService.getScriptProperties().getProperty('ULTIMA_COPIA') || '',
+    imagenes: diagnosticoImagenes_(),
     hora: new Date().toISOString()
   };
 }
@@ -635,12 +644,67 @@ function guardarFotos_(pid, fotos) {
   return ids.join(',');
 }
 
-function programarIdentificacion_() {
+/**
+ * Disparadores: uno inmediato (al dar de alta productos) y uno periódico cada hora.
+ * Cada hora y con tiempo limitado por vuelta: las cuentas gratuitas de Google solo permiten
+ * 90 minutos al día de ejecución por disparadores; si se pasa, Google los para hasta el día siguiente.
+ */
+function programarIdentificacion_(soloPeriodico) {
+  var props = PropertiesService.getScriptProperties();
   var ts = ScriptApp.getProjectTriggers();
+  if (props.getProperty('DISPARADOR_V') !== '2') {
+    ts.forEach(function (t) { if (t.getHandlerFunction() === 'identificarPendientes') ScriptApp.deleteTrigger(t); });
+    ts = ScriptApp.getProjectTriggers();
+    props.setProperty('DISPARADOR_V', '2');
+  }
   var ahora = ts.some(function (t) { return t.getHandlerFunction() === 'identificarAhora'; });
-  var periodico = ts.some(function (t) { return t.getHandlerFunction() === 'identificarPendientes'; });
-  if (!ahora) ScriptApp.newTrigger('identificarAhora').timeBased().after(10 * 1000).create();
-  if (!periodico) ScriptApp.newTrigger('identificarPendientes').timeBased().everyMinutes(15).create();
+  var periodico = ts.some(function (t) { return t.getHandlerFunction() === 'identificarPeriodico'; });
+  if (!ahora && !soloPeriodico) ScriptApp.newTrigger('identificarAhora').timeBased().after(10 * 1000).create();
+  if (!periodico) ScriptApp.newTrigger('identificarPeriodico').timeBased().everyHours(1).create();
+}
+
+function identificarPeriodico() { identificarPendientes(150000); }
+
+/** Desde el menú: sin límite de disparadores, hasta 5 minutos. */
+function buscarImagenesAhora() {
+  identificarPendientes(300000);
+  var d = diagnosticoImagenes_();
+  aviso_('Imágenes: ' + d.conFoto + ' con foto, ' + d.pendientes + ' por buscar, ' + d.sinImagen + ' sin encontrar.' +
+    (d.ultimoError ? ' Último error: ' + d.ultimoError : ''));
+}
+
+/** Vuelve a buscar las que no se encontraron (por ejemplo, tras un fallo de cuota). */
+function reintentarImagenes() {
+  var lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    var filas = filas_('PRODUCTOS'), n = 0;
+    filas.forEach(function (p) { if (!p.foto && (p.img_estado === 'no' || p.img_estado === 'no1')) { p.img_estado = ''; n++; } });
+    escribirProductos_(filas);
+    aviso_(n + ' productos volverán a buscar imagen.');
+  } finally { lock.releaseLock(); }
+  try { programarIdentificacion_(); } catch (e) { Logger.log(e); }
+}
+
+function escribirProductos_(filas) {
+  var cab = HOJAS.PRODUCTOS;
+  if (!filas.length) return;
+  SpreadsheetApp.getActiveSpreadsheet().getSheetByName('PRODUCTOS').getRange(2, 1, filas.length, cab.length)
+    .setNumberFormat('@').setValues(filas.map(function (p) { return cab.map(function (c) { return p[c]; }); }));
+}
+
+function diagnosticoImagenes_() {
+  var props = PropertiesService.getScriptProperties();
+  var d = { conFoto: 0, pendientes: 0, sinImagen: 0, ultimoError: props.getProperty('ULTIMO_ERROR_IMG') || '',
+    ultimaBusqueda: props.getProperty('ULTIMA_BUSQUEDA_IMG') || '', gemini: !!props.getProperty('GEMINI_KEY') };
+  filasOpc_('PRODUCTOS').forEach(function (p) {
+    if (p.activo === 'NO' || p.fusionado_en) return;
+    if (p.foto) d.conFoto++;
+    else if (p.img_estado === 'no') d.sinImagen++;
+    else d.pendientes++;
+  });
+  try { d.disparador = ScriptApp.getProjectTriggers().some(function (t) { return t.getHandlerFunction() === 'identificarPeriodico'; }); } catch (e) { d.disparador = null; }
+  return d;
 }
 
 function identificarAhora() {
@@ -737,11 +801,12 @@ function identificar_(pet) {
 }
 
 /** Identifica en segundo plano los productos «pendiente» (máx. 5 por vuelta). */
-function identificarPendientes() {
+function identificarPendientes(limiteMs) {
   if (!PropertiesService.getScriptProperties().getProperty('GEMINI_KEY')) return;
+  var fin = Date.now() + (Number(limiteMs) || 150000);
   asegurarCabeceras_('PRODUCTOS');
   identificarFotos_();
-  buscarImagenes_(8);
+  if (Date.now() < fin - 20000) buscarImagenes_(40, fin);
 }
 
 function identificarFotos_() {
@@ -915,20 +980,30 @@ function cargarCatalogo() {
 
 /* ───────────────────────── Imágenes de internet ───────────────────────── */
 
-/** Busca imagen para productos sin foto (máx. `n` por vuelta). Se llama desde identificarPendientes. */
-function buscarImagenes_(n) {
-  if (!PropertiesService.getScriptProperties().getProperty('GEMINI_KEY')) return 0;
+/**
+ * Busca imagen para productos sin foto, hasta `n` o hasta la hora `fin`.
+ * Si Gemini falla (cuota, saturación) se para y no marca nada: se reintentará en la siguiente vuelta.
+ */
+function buscarImagenes_(n, fin) {
+  var props = PropertiesService.getScriptProperties();
+  if (!props.getProperty('GEMINI_KEY')) return 0;
+  fin = fin || Date.now() + 120000;
   var candidatos = filas_('PRODUCTOS').filter(function (p) {
     return p.activo !== 'NO' && !p.fusionado_en && !p.foto && p.estado_ia !== 'pendiente' && (p.img_estado === '' || p.img_estado === 'no1') && p.nombre.indexOf('Pendiente') !== 0;
   }).slice(0, n || 8);
   if (!candidatos.length) return 0;
-  var res = {};
-  candidatos.forEach(function (p) {
-    var url = '';
-    try { url = buscarUrlImagen_(p); } catch (e) { Logger.log('Imagen ' + p.id + ': ' + e); }
-    var blob = url ? descargarImagen_(url) : null;
+  var res = {}, hechos = 0;
+  for (var i = 0; i < candidatos.length; i++) {
+    if (Date.now() > fin - 25000) break;
+    var p = candidatos[i], r;
+    try { r = buscarUrlImagen_(p); } catch (e) { r = { estado: 'error', error: String(e.message || e) }; }
+    if (r.estado === 'error') { props.setProperty('ULTIMO_ERROR_IMG', new Date().toISOString().slice(0, 16) + ' ' + r.error.slice(0, 180)); break; }
+    var blob = r.url ? descargarImagen_(r.url) : null;
     res[p.id] = blob ? guardarFotos_(p.id, [Utilities.base64Encode(blob.getBytes())]) : '';
-  });
+    hechos++;
+  }
+  props.setProperty('ULTIMA_BUSQUEDA_IMG', new Date().toISOString());
+  if (!hechos) return 0;
   var lock = LockService.getScriptLock();
   lock.waitLock(30000);
   try {
@@ -938,38 +1013,51 @@ function buscarImagenes_(n) {
       if (res[p.id]) { p.foto = res[p.id]; p.img_estado = 'internet'; }
       else p.img_estado = p.img_estado === 'no1' ? 'no' : 'no1';
     });
-    var cab = HOJAS.PRODUCTOS;
-    SpreadsheetApp.getActiveSpreadsheet().getSheetByName('PRODUCTOS').getRange(2, 1, filas.length, cab.length)
-      .setNumberFormat('@').setValues(filas.map(function (p) { return cab.map(function (c) { return p[c]; }); }));
+    escribirProductos_(filas);
   } finally {
     lock.releaseLock();
   }
-  return candidatos.length;
+  return hechos;
 }
 
+/** {estado: 'ok'|'sin'|'error', url, error}. Usa las páginas que encuentra la búsqueda de Google (og:image). */
 function buscarUrlImagen_(p) {
-  var key = PropertiesService.getScriptProperties().getProperty('GEMINI_KEY');
-  var modelo = PropertiesService.getScriptProperties().getProperty('GEMINI_MODELO') || 'gemini-flash-latest';
-  var prompt = 'Busca en internet una foto del producto dental: "' + p.nombre + '"' +
+  var props = PropertiesService.getScriptProperties();
+  var key = props.getProperty('GEMINI_KEY');
+  var modelo = props.getProperty('GEMINI_MODELO') || 'gemini-flash-latest';
+  var prompt = 'Busca en internet la página de este producto dental en la web del fabricante o de un distribuidor dental: "' + p.nombre + '"' +
     (p.ref_proveedor ? ', referencia ' + p.ref_proveedor : '') + (p.proveedor ? ', vendido por ' + p.proveedor : '') +
-    '. Prefiere la web del fabricante o de un distribuidor dental. Responde SOLO con JSON: ' +
-    '{"imagen": "URL directa de la imagen (.jpg, .png o .webp) o vacío", "pagina": "URL de la página del producto o vacío"}. No inventes URLs.';
-  var modelos = [modelo, 'gemini-flash-latest', 'gemini-flash-lite-latest'].filter(function (m, i, a) { return a.indexOf(m) === i; });
+    '. Responde SOLO con JSON: {"pagina": "URL de la página del producto o vacío", "imagen": "URL directa de la imagen del producto o vacío"}. No inventes URLs.';
+  var modelos = [modelo, 'gemini-flash-latest', 'gemini-flash-lite-latest', 'gemini-2.5-flash'].filter(function (m, i, a) { return a.indexOf(m) === i; });
+  var ultimo = '';
   for (var i = 0; i < modelos.length; i++) {
     var r = UrlFetchApp.fetch('https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(modelos[i]) + ':generateContent', {
       method: 'post', contentType: 'application/json', muteHttpExceptions: true, headers: { 'x-goog-api-key': key },
       payload: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], tools: [{ google_search: {} }], generationConfig: { temperature: 0.1 } })
     });
-    if (r.getResponseCode() !== 200) continue;
-    var d = leerJsonGemini_(r.getContentText()) || {};
-    if (d.imagen && /^https?:\/\//.test(d.imagen) && descargarImagen_(d.imagen, true)) return d.imagen;
-    if (d.pagina && /^https?:\/\//.test(d.pagina)) {
-      var og = imagenDePagina_(d.pagina);
-      if (og) return og;
+    var code = r.getResponseCode();
+    if (code !== 200) {
+      ultimo = modelos[i] + ' ' + code + ': ' + r.getContentText().slice(0, 150);
+      if (code === 401 || code === 403) break;
+      continue;
     }
-    return '';
+    var texto = r.getContentText();
+    var d = leerJsonGemini_(texto) || {};
+    var paginas = [];
+    if (d.pagina && /^https?:\/\//.test(d.pagina)) paginas.push(d.pagina);
+    try {
+      var j = JSON.parse(texto);
+      var chunks = (j.candidates && j.candidates[0] && j.candidates[0].groundingMetadata && j.candidates[0].groundingMetadata.groundingChunks) || [];
+      chunks.forEach(function (c) { if (c.web && c.web.uri) paginas.push(c.web.uri); });
+    } catch (e) { /* sin metadatos */ }
+    if (d.imagen && /^https?:\/\//.test(d.imagen) && descargarImagen_(d.imagen, true)) return { estado: 'ok', url: d.imagen };
+    for (var k = 0; k < paginas.length && k < 4; k++) {
+      var og = imagenDePagina_(paginas[k]);
+      if (og) return { estado: 'ok', url: og };
+    }
+    return { estado: 'sin', url: '' };
   }
-  return '';
+  return { estado: 'error', error: ultimo || 'Gemini no responde' };
 }
 
 /** Lee la imagen principal (og:image) de una página de producto. */
@@ -978,12 +1066,12 @@ function imagenDePagina_(url) {
     var r = UrlFetchApp.fetch(url, { muteHttpExceptions: true, followRedirects: true, headers: { 'User-Agent': 'Mozilla/5.0 (inventario clinica)' } });
     if (r.getResponseCode() !== 200) return '';
     var html = r.getContentText().slice(0, 300000);
-    var m = html.match(/<meta[^>]+property=["']og:image(?::secure_url)?["'][^>]+content=["']([^"']+)["']/i) ||
-      html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image["']/i);
+    var m = html.match(/<meta[^>]+(?:property|name)=["'](?:og:image(?::secure_url)?|twitter:image)["'][^>]+content=["']([^"']+)["']/i) ||
+      html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+(?:property|name)=["'](?:og:image|twitter:image)["']/i);
     if (!m) return '';
     var img = m[1].replace(/&amp;/g, '&');
     if (img.indexOf('//') === 0) img = 'https:' + img;
-    if (img.indexOf('/') === 0) img = url.replace(/^(https?:\/\/[^/]+).*$/, '$1') + img;
+    if (!/^https?:\/\//.test(img)) return ''; // relativa tras una redirección: no se puede resolver con seguridad
     return descargarImagen_(img, true) ? img : '';
   } catch (e) { return ''; }
 }

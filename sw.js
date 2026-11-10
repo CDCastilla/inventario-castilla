@@ -1,8 +1,8 @@
 // Service worker: guarda la app para que abra sin conexión.
 // Al publicar una versión nueva, sube VERSION (y el ?v= de index.html).
-const VERSION = 'inv-8';
+const VERSION = 'inv-9';
 const ARCHIVOS = [
-  './', 'index.html', 'css/app.css?v=4', 'js/app.js?v=8', 'js/gs1.js', 'js/logica.js',
+  './', 'index.html', 'css/app.css?v=4', 'js/app.js?v=9', 'js/gs1.js', 'js/logica.js',
   'manifest.webmanifest', 'iconos/icono-192.png', 'iconos/icono-512.png', 'iconos/monograma-beige.svg'
 ];
 

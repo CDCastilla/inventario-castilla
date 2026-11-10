@@ -57,8 +57,11 @@ partir de las facturas: `2026\Catalogo inventario app.xlsx` en la carpeta de fac
    **CATALOGO_IMPORTAR** (la pestaña *Resumen* se puede borrar).
 2. Menú **Inventario → Cargar catálogo**. Crea un producto por artículo y guarda sus referencias en **CATALOGO**.
    Se puede repetir con un Excel nuevo: no duplica (clave proveedor + referencia) y actualiza precios.
-3. Las imágenes de los productos sin foto se buscan solas en internet (8 cada 15 minutos). Para acelerar:
-   **Inventario → Buscar imágenes e identificar ahora**.
+3. Las imágenes de los productos sin foto se buscan solas en internet **cada hora** (unos 2,5 minutos por
+   vuelta: las cuentas gratuitas de Google solo permiten 90 minutos al día de tareas automáticas). Para
+   acelerar: **Inventario → Buscar imágenes ahora (5 min)**, que no gasta ese cupo. Si Gemini da error de
+   cuota, no se marca nada y se reintenta en la siguiente vuelta. **Volver a buscar imágenes no encontradas**
+   da otra oportunidad a las que no se encontraron. El estado se ve en la app, en **Ajustes → Imágenes**.
 
 En la app, **Posibles duplicados** muestra parejas que podrían ser el mismo artículo (por ejemplo, comprado a
 dos depósitos con referencias distintas). **Combinar** deja uno solo con todas las referencias, códigos, fotos

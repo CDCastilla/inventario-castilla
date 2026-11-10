@@ -5,7 +5,7 @@ import {
   unidadesSalida, normaliza, diasEntre, finCaducidad, posiblesDuplicados, parecidos
 } from './logica.js';
 
-const VERSION_APP = '1.4.0';
+const VERSION_APP = '1.5.0';
 const $ = (s) => document.querySelector(s);
 const vista = $('#vista');
 
@@ -108,7 +108,7 @@ function aplicarEstado(j) {
   datos = {
     productos: j.productos, codigos: j.codigos, config: j.config, dotacion: j.dotacion,
     stock: j.stock, reposiciones: j.reposiciones, movimientos: j.movimientos, ultimaCopia: j.ultimaCopia, version: j.version,
-    catalogo: j.catalogo || [], noDuplicados: j.noDuplicados || []
+    catalogo: j.catalogo || [], noDuplicados: j.noDuplicados || [], imagenes: j.imagenes || null
   };
   guardar('datos', datos);
   ultimaSync = new Date().toISOString();
@@ -184,24 +184,27 @@ async function escribirCache(k, v) {
   try { await (await caches.open(CACHE_FOTOS)).put(k, new Response(v)); } catch { /* sin caché */ }
 }
 /** Guarda una foto recién hecha (base64 JPEG) como foto del producto en el móvil. */
+// La clave lleva la versión de la foto: si cambia en el servidor (foto nueva o de internet), se vuelve a descargar.
+const versionFoto = (pid) => pid + '/' + (prods().get(pid)?.foto_v || 'local');
 async function guardarFotoLocal(pid, b64) {
-  await escribirCache('foto/' + pid, 'data:image/jpeg;base64,' + b64);
-  await escribirCache('mini/' + pid, '');
+  await escribirCache('foto/' + pid + '/local', 'data:image/jpeg;base64,' + b64);
 }
 /** Foto del producto como data URL ('' si no tiene). */
 async function fotoProducto(pid) {
-  let url = await leerCache('foto/' + pid);
+  const k = 'foto/' + versionFoto(pid);
+  let url = await leerCache(k) || await leerCache('foto/' + pid + '/local');
   if (url) return url;
   try {
     const j = await api('foto', { producto_id: pid });
     if (j.base64) url = `data:${j.tipo || 'image/jpeg'};base64,${j.base64}`;
   } catch { return ''; }
-  if (url) await escribirCache('foto/' + pid, url);
+  if (url) await escribirCache(k, url);
   return url;
 }
 /** Miniatura (120 px) para las listas. */
 async function miniatura(pid) {
-  let m = await leerCache('mini/' + pid);
+  const km = 'mini/' + versionFoto(pid);
+  let m = await leerCache(km);
   if (m) return m;
   const url = await fotoProducto(pid);
   if (!url) return '';
@@ -216,7 +219,7 @@ async function miniatura(pid) {
     img.onerror = () => ok('');
     img.src = url;
   });
-  if (m) await escribirCache('mini/' + pid, m);
+  if (m) await escribirCache(km, m);
   return m;
 }
 // Carga perezosa de miniaturas: solo las que se ven, de dos en dos.
@@ -942,6 +945,12 @@ VISTAS.ajustes = () => {
       <span class="peq">Sin enviar: ${cola.length} · última sincronización: ${ultimaSync ? fechaCorta(ultimaSync) : '—'}</span>
       <span class="peq">Última copia de seguridad: ${datos.ultimaCopia ? fechaCorta(datos.ultimaCopia) : '—'}</span>
     </section>
+    ${datos.imagenes ? `<section class="tarjeta">
+      <h2>Imágenes de productos</h2>
+      <span class="peq">${datos.imagenes.conFoto} con foto · ${datos.imagenes.pendientes} por buscar · ${datos.imagenes.sinImagen} sin encontrar</span>
+      <span class="peq">Búsqueda automática: ${!datos.imagenes.gemini ? 'falta la clave de Gemini' : datos.imagenes.disparador === false ? 'parada (falta el disparador)' : 'activa, cada hora'}${datos.imagenes.ultimaBusqueda ? ' · última: ' + fechaCorta(datos.imagenes.ultimaBusqueda) : ''}</span>
+      ${datos.imagenes.ultimoError ? `<span class="peq">Último error: ${h(datos.imagenes.ultimoError)}</span>` : ''}
+    </section>` : ''}
     <button class="btn borde" id="exportar">Exportar a Excel</button>
     ${rechazos.length ? `<section class="tarjeta"><h2>Rechazados por el servidor</h2>${rechazos.map((r) => `<div class="hist"><span>${h(r.resumen)}<br><span class="peq">${h(r.motivo)} · ${fechaCorta(r.fecha)}</span></span></div>`).join('')}<button class="btn claro" id="limpiar">Borrar esta lista</button></section>` : ''}`;
   $('#f').onsubmit = async (e) => {
