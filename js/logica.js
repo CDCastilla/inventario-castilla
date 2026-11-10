@@ -235,7 +235,24 @@ const FIN_PEDIDO = /^(otros servicios|resumen( de tu pedido)?|subtotal|base impo
  * Ignora portes, catálogos y resúmenes. Devuelve {numero, fecha, formato, lineas:[{linea, descripcion, ref, precio, cantidad, iva}]}.
  */
 export function leerPedido(texto) {
-  const filas = String(texto || '').replace(/\r/g, '').split(/\n|\t/).map((x) => x.replace(/\s+/g, ' ').trim()).filter(Boolean);
+  // Lo que se copia de una web trae a veces caracteres invisibles, saltos raros o «Referencia:» y el valor en filas distintas.
+  const crudas = String(texto || '')
+    .replace(/[\u200B-\u200D\u2060\uFEFF\u00AD]/g, '')
+    .replace(/\r\n?|[\u2028\u2029\u0085\v\f]/g, '\n').replace(/：/g, ':')
+    // «Referencia:» en mitad de una fila (copiado desde el móvil, todo seguido) → fila propia
+    .replace(/\s+(?=ref(?:erencia)?\s*:)/gi, '\n')
+    .split(/\n|\t/).map((x) => x.replace(/\s+/g, ' ').trim()).filter(Boolean)
+    .flatMap((x) => {
+      // «Referencia:3109 30,08 € 1u. 21%» → referencia, precio, cantidad e IVA en filas
+      const m = x.match(/^(ref(?:erencia)?\s*:\s*\S+)\s+(.*\d.*)$/i);
+      if (!m) return [x];
+      const resto = m[2].match(/-?[\d.]+,\d{1,2}\s*€|\d+(?:,\d+)?\s*(?:u|ud|uds|unid\.?|unidades)\.?(?=\s|$)|\d{1,2}\s*%|\S.*?(?=\s+-?[\d.]+,\d{1,2}\s*€|$)/gi) || [];
+      return [m[1], ...resto.map((t) => t.trim()).filter(Boolean)];
+    });
+  const filas = [];
+  for (let i = 0; i < crudas.length; i++) {
+    if (/^(ref(erencia)?|c[oó]digo|n[uú]mero de pedido|pedido|fecha)\.?\s*:$/i.test(crudas[i]) && crudas[i + 1]) { filas.push(crudas[i] + ' ' + crudas[i + 1]); i++; } else filas.push(crudas[i]);
+  }
   let numero = '', fecha = '';
   for (let i = 0; i < filas.length; i++) {
     const f = filas[i], sig = filas[i + 1] || '';

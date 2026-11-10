@@ -5,7 +5,7 @@ import {
   unidadesSalida, normaliza, diasEntre, finCaducidad, posiblesDuplicados, parecidos, coincidenciasTexto, leerPedido, proveedorProbable, emparejarPedido
 } from './logica.js';
 
-const VERSION_APP = '1.8.1';
+const VERSION_APP = '1.8.2';
 const $ = (s) => document.querySelector(s);
 const vista = $('#vista');
 
@@ -1059,6 +1059,7 @@ VISTAS.pedidoPegar = (p) => {
         <label>Texto del pedido<textarea name="t" rows="10" placeholder="Pedido 10169186&#10;Fecha: 10/11/2026&#10;Producto…&#10;Referencia: 3109&#10;30,08 €&#10;1u.">${h(p.texto || '')}</textarea></label>
         <button class="btn claro" type="button" id="portapapeles">Pegar desde el portapapeles</button>
         <button class="btn grande">Leer pedido</button>
+        <div class="nota" id="diag" hidden></div>
       </form>`;
     const f = $('#f');
     $('#portapapeles').onclick = async () => {
@@ -1068,7 +1069,14 @@ VISTAS.pedidoPegar = (p) => {
       e.preventDefault();
       p.texto = f.t.value;
       const r = leerPedido(p.texto);
-      if (!r.lineas.length) { aviso('No encuentro líneas con «Referencia»: copia la página entera del pedido'); return; }
+      if (!r.lineas.length) {
+        // Diagnóstico: qué ve la app (para poder ajustar el lector a ese formato).
+        const filas = p.texto.split(/\r\n?|\n/).filter((x) => x.trim()).slice(0, 14);
+        const cod = (x) => [...x.slice(0, 40)].map((c) => (c.charCodeAt(0) < 32 || c.charCodeAt(0) > 126 && !/[\p{L}\p{N}€º]/u.test(c) ? `[${c.charCodeAt(0).toString(16)}]` : c)).join('');
+        $('#diag').hidden = false;
+        $('#diag').innerHTML = `<b>No he sabido leer este pedido.</b> Haz una captura de esto y pásasela a Claude para ajustar el lector:<br><span class="peq">${filas.length} filas · ${p.texto.length} caracteres</span><pre style="white-space:pre-wrap;font-size:11px;margin:6px 0 0">${h(filas.map(cod).join('\n'))}</pre>`;
+        return;
+      }
       p.numero = r.numero; p.fecha = r.fecha || hoy();
       p.proveedor = proveedorProbable(r.lineas, datos.catalogo || [], p.texto) || leer('ultimoProveedorPedido', '');
       p.base = r.lineas;

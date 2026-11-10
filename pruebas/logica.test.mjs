@@ -169,3 +169,22 @@ test('leerPedido: pedido en tabla de Proclinic (con descuentos, regalo y referen
   assert.equal(e[3].producto_id, 'PA');
   assert.equal(e[4].estado, 'nuevo');
 });
+
+test('leerPedido: texto copiado con caracteres invisibles, saltos raros o todo seguido', async () => {
+  const { leerPedido } = await import('../js/logica.js');
+  const { readFileSync } = await import('node:fs');
+  const t = readFileSync(new URL('./pedido-dentaltix.txt', import.meta.url), 'utf8');
+  const variantes = {
+    invisibles: t.replace(/Referencia/g, '\u200bReferencia'),
+    separado: t.replace(/Referencia:/g, 'Referencia:\n'),
+    soloCR: t.replace(/\n/g, '\r'),
+    separadorUnicode: t.replace(/\n/g, '\u2028'),
+    seguido: t.replace(/\n(Referencia:[^\n]+)\n([^\n]+€)\n([^\n]+u\.)\n([^\n]+%)/g, ' $1 $2 $3 $4')
+  };
+  for (const [k, v] of Object.entries(variantes)) {
+    const r = leerPedido(v);
+    assert.equal(r.lineas.length, 18, k);
+    assert.equal(r.numero, '10169186', k);
+    assert.equal(r.lineas[11].cantidad, 2, k);
+  }
+});
