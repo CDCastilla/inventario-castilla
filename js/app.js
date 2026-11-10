@@ -5,7 +5,7 @@ import {
   unidadesSalida, normaliza, diasEntre, finCaducidad, posiblesDuplicados, parecidos
 } from './logica.js';
 
-const VERSION_APP = '1.5.0';
+const VERSION_APP = '1.5.1';
 const $ = (s) => document.querySelector(s);
 const vista = $('#vista');
 
@@ -402,24 +402,43 @@ VISTAS.stock = (p) => {
   const estado = { texto: p.texto || '', filtro: p.filtro || (p.elegir ? 'todo' : 'con'), armario: p.armario || '' };
   const refsDe = new Map();
   for (const c of datos.catalogo || []) { if (!refsDe.has(c.producto_id)) refsDe.set(c.producto_id, []); refsDe.get(c.producto_id).push(c.ref + ' ' + c.proveedor + ' ' + c.descripcion); }
+  // Depósito y referencia de cada producto (todas las de sus facturas; si no hay, la de la ficha).
+  const corto = (prov) => String(prov || '').replace(/\s*\(.*\)\s*$/, '').trim();
+  const depositosDe = new Map();
+  for (const c of datos.catalogo || []) {
+    if (!depositosDe.has(c.producto_id)) depositosDe.set(c.producto_id, []);
+    const l = depositosDe.get(c.producto_id);
+    const t = [corto(c.proveedor), c.ref].filter(Boolean).join(' ');
+    if (t && !l.includes(t)) l.push(t);
+  }
+  const depositos = (pr) => {
+    const l = depositosDe.get(pr.id) || [];
+    if (l.length) return l;
+    const t = [corto(pr.proveedor), pr.ref_proveedor].filter(Boolean).join(' ');
+    return t ? [t] : [];
+  };
   const armarios = (datos.config.armario || []).map((a) => a.nombre);
   vista.innerHTML = `
-    <label>Buscar<input type="search" id="buscar" placeholder="Nombre, referencia o proveedor" value="${h(estado.texto)}" autocomplete="off"></label>
+    <label>Buscar<input type="search" id="buscar" placeholder="Busca en todo el catálogo: nombre, referencia o proveedor" value="${h(estado.texto)}" autocomplete="off"></label>
     <div class="segmentos" role="group" aria-label="Filtro">
       ${[['con', 'Con stock'], ['todo', 'Todo el catálogo'], ['bajo', 'Bajo mínimo'], ['caduca', 'Caduca pronto'], ['revisar', 'Por revisar']].map(([k, t]) => `<button data-f="${k}" aria-pressed="${estado.filtro === k}">${t}</button>`).join('')}
     </div>
     <label>Armario<select id="armario"><option value="">Todos</option>${armarios.map((a) => `<option ${a === estado.armario ? 'selected' : ''}>${h(a)}</option>`).join('')}</select></label>
     <div class="lista" id="res"></div>`;
   const pintarLista = () => {
-    const q = normaliza(estado.texto);
+    const palabras = normaliza(estado.texto).split(/\s+/).filter(Boolean);
     const a = avisos(datos, s, hoy());
     const caducan = new Set(a.caducan.map((c) => c.producto_id));
     const lista = datos.productos.filter((pr) => {
       if (!pr.activo) return false;
       if (estado.armario && pr.armario !== estado.armario) return false;
-      if (q && !normaliza(`${pr.nombre} ${pr.ref_proveedor} ${pr.proveedor} ${pr.categoria} ${(refsDe.get(pr.id) || []).join(' ')}`).includes(q)) return false;
+      if (palabras.length) {
+        const texto = normaliza(`${pr.nombre} ${pr.ref_proveedor} ${pr.proveedor} ${pr.categoria} ${(refsDe.get(pr.id) || []).join(' ')}`);
+        if (!palabras.every((w) => texto.includes(w))) return false;
+      }
       const t = totalDe(s, pr.id);
-      if (estado.filtro === 'con') return t > 0 || !!pr.estado_ia;
+      // Al buscar por texto, «Con stock» no esconde nada: se busca en todo el catálogo.
+      if (estado.filtro === 'con') return palabras.length > 0 || t > 0 || !!pr.estado_ia;
       if (estado.filtro === 'bajo') return pr.minimo > 0 && t < pr.minimo;
       if (estado.filtro === 'caduca') return caducan.has(pr.id);
       if (estado.filtro === 'revisar') return !!pr.estado_ia;
@@ -436,7 +455,8 @@ VISTAS.stock = (p) => {
         ${cajaMini(pr)}
         <span class="cuerpo">
           <span class="entre"><span class="fuerte">${h(pr.nombre)}</span><span class="cifra">${h(formatoCantidad(t, pr))}</span></span>
-          <span class="entre peq"><span>${h([pr.proveedor, pr.armario].filter(Boolean).join(' · '))}${prox ? ' · cad. ' + cad(prox.caducidad) : ''}</span>${pr.estado_ia === 'pendiente' ? '<span class="chip">identificando</span>' : pr.estado_ia ? '<span class="chip aviso">revisar</span>' : bajo ? `<span class="chip aviso">mín. ${pr.minimo}</span>` : ''}</span>
+          ${depositos(pr).length ? `<span class="peq ref-lista">${depositos(pr).map((d) => h(d)).join('<br>')}</span>` : ''}
+          <span class="entre peq"><span>${h(pr.armario || '')}${prox ? (pr.armario ? ' · ' : '') + 'cad. ' + cad(prox.caducidad) : ''}</span>${pr.estado_ia === 'pendiente' ? '<span class="chip">identificando</span>' : pr.estado_ia ? '<span class="chip aviso">revisar</span>' : bajo ? `<span class="chip aviso">mín. ${pr.minimo}</span>` : ''}</span>
         </span>
       </button>`;
     }).join('') + (total > visibles.length ? `<button class="btn claro" id="mas">Ver más (${total - visibles.length})</button>` : '')
@@ -595,8 +615,14 @@ VISTAS.codigoNuevo = (p) => {
     const res = $('#res'); res.hidden = false;
     res.innerHTML = '<label>Buscar<input type="search" id="buscar" placeholder="Nombre o referencia" autocomplete="off"></label><div class="lista" id="res2"></div>';
     const pintarLista = (q) => {
-      q = normaliza(q);
-      const l = datos.productos.filter((x) => x.activo && (!q || normaliza(x.nombre + ' ' + x.ref_proveedor).includes(q))).slice(0, 30);
+      const palabras = normaliza(q).split(/\s+/).filter(Boolean);
+      const refs = {};
+      for (const c of datos.catalogo || []) refs[c.producto_id] = (refs[c.producto_id] || '') + ' ' + c.ref + ' ' + c.proveedor;
+      const l = datos.productos.filter((x) => {
+        if (!x.activo) return false;
+        const texto = normaliza(x.nombre + ' ' + x.ref_proveedor + ' ' + x.proveedor + (refs[x.id] || ''));
+        return palabras.every((w) => texto.includes(w));
+      }).slice(0, 30);
       $('#res2').innerHTML = l.map((x) => `<button class="tarjeta item" data-pid="${h(x.id)}"><span class="fuerte">${h(x.nombre)}</span><span class="peq">${h(x.ref_proveedor || x.categoria)}</span></button>`).join('');
       $('#res2').querySelectorAll('[data-pid]').forEach((b) => {
         b.onclick = () => {

@@ -90,3 +90,5 @@ textarea { min-height: 72px; }
 .par .lado { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; font-size: 14px; }
 .par .lado .mini { width: 100%; height: 110px; flex: none; }
 .par label.check { font-size: 14px; }
+
+.ref-lista { color: var(--marron, #2B2421); opacity: .8; overflow-wrap: anywhere; }
