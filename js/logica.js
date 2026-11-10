@@ -219,3 +219,73 @@ export function coincidenciasTexto(leido, productos, catalogo = [], n = 8) {
   }
   return res.sort((a, b) => b.puntos - a.puntos || a.p.nombre.localeCompare(b.p.nombre, 'es')).slice(0, n);
 }
+
+/* ───────────── Pedido pegado desde la web del depósito ───────────── */
+const CABECERAS_PEDIDO = /^(precio( unitario)?|cantidad|iva|total|subtotal|repetir pedido|en preparaci[oó]n:?|enviado:?|entregado:?|pendiente:?|producto|art[ií]culo|descripci[oó]n)$/i;
+const numeroEs = (t) => Number(String(t).replace(/\./g, '').replace(',', '.'));
+
+/**
+ * Lee el texto copiado de un pedido (formato tipo Dentaltix: descripción, «Referencia:», precio, «2u.», IVA).
+ * Ignora «Otros servicios» (portes, catálogos). Devuelve {numero, fecha, lineas:[{linea, descripcion, ref, precio, cantidad, iva}]}.
+ */
+export function leerPedido(texto) {
+  const filas = String(texto || '').replace(/\r/g, '').split(/\n|\t/).map((x) => x.replace(/\s+/g, ' ').trim()).filter(Boolean);
+  let numero = '', fecha = '';
+  const lineas = [];
+  let desc = [];
+  for (let i = 0; i < filas.length; i++) {
+    const f = filas[i];
+    if (/^otros servicios/i.test(f)) break;
+    let m;
+    if (!numero && (m = f.match(/^pedido\s*(?:n[ºo.]*\s*)?:?\s*([A-Z0-9-]{4,})$/i))) { numero = m[1]; desc = []; continue; }
+    if (!fecha && (m = f.match(/^fecha\s*:?\s*(\d{1,2})[/.-](\d{1,2})[/.-](\d{4})/i))) { fecha = `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`; desc = []; continue; }
+    if ((m = f.match(/^ref(?:erencia)?\.?\s*:?\s*(\S.*)$/i))) {
+      const l = { linea: lineas.length + 1, descripcion: desc.join(' ').slice(0, 200), ref: m[1].trim(), precio: 0, cantidad: 1, iva: '' };
+      for (let j = i + 1; j < Math.min(filas.length, i + 6); j++) {
+        const g = filas[j];
+        let k;
+        if ((k = g.match(/^(-?[\d.]+,\d{1,2})\s*€$/)) && !l._precio) { l.precio = numeroEs(k[1]); l._precio = true; i = j; continue; }
+        if ((k = g.match(/^(\d+(?:,\d+)?)\s*(?:u|ud|uds|unid\.?|unidades)\.?$/i))) { l.cantidad = numeroEs(k[1]); i = j; continue; }
+        if ((k = g.match(/^(\d{1,2})\s*%$/))) { l.iva = k[1]; i = j; continue; }
+        break;
+      }
+      delete l._precio;
+      if (l.descripcion) lineas.push(l);
+      desc = [];
+      continue;
+    }
+    if (CABECERAS_PEDIDO.test(f)) continue;
+    desc.push(f);
+    if (desc.length > 3) desc.shift();
+  }
+  return { numero, fecha, lineas };
+}
+
+const refNorm = (r) => String(r || '').toUpperCase().replace(/\s+/g, '');
+
+/** Depósito al que más se parecen las referencias del pedido (según el catálogo). */
+export function proveedorProbable(lineas, catalogo = []) {
+  const refs = new Set(lineas.map((l) => refNorm(l.ref)));
+  const n = new Map();
+  for (const c of catalogo) if (refs.has(refNorm(c.ref))) n.set(c.proveedor, (n.get(c.proveedor) || 0) + 1);
+  return [...n.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || '';
+}
+
+/**
+ * Cada línea con su producto: «ref» (misma referencia en ese depósito o en la ficha: seguro),
+ * «parecido» (sugerencia por el nombre; hay que confirmarla) o «nuevo».
+ */
+export function emparejarPedido(lineas, proveedor, productos, catalogo = []) {
+  const activos = new Map(productos.filter((p) => p.activo).map((p) => [p.id, p]));
+  const porRef = new Map(), porRefFicha = new Map();
+  const prov = normaliza(proveedor).trim();
+  for (const c of catalogo) if (normaliza(c.proveedor).trim() === prov && activos.has(c.producto_id)) porRef.set(refNorm(c.ref), c.producto_id);
+  for (const p of activos.values()) if (p.ref_proveedor && (!p.proveedor || normaliza(p.proveedor).trim() === prov)) porRefFicha.set(refNorm(p.ref_proveedor), p.id);
+  return lineas.map((l) => {
+    const r = refNorm(l.ref);
+    const pid = porRef.get(r) || porRefFicha.get(r);
+    if (pid) return { ...l, producto_id: pid, estado: 'ref', sugerencias: [] };
+    const sug = coincidenciasTexto({ nombre: l.descripcion }, [...activos.values()], catalogo, 5).filter((x) => x.puntos >= 0.35).map((x) => x.p.id);
+    return { ...l, producto_id: '', estado: sug.length ? 'parecido' : 'nuevo', sugerencias: sug };
+  });
+}

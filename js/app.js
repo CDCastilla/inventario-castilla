@@ -2,10 +2,10 @@
 import { leerCodigo } from './gs1.js';
 import {
   stockActual, lotesDe, totalDe, formatoCantidad, avisos, nuevoIdProducto, nuevoUuid,
-  unidadesSalida, normaliza, diasEntre, finCaducidad, posiblesDuplicados, parecidos, coincidenciasTexto
+  unidadesSalida, normaliza, diasEntre, finCaducidad, posiblesDuplicados, parecidos, coincidenciasTexto, leerPedido, proveedorProbable, emparejarPedido
 } from './logica.js';
 
-const VERSION_APP = '1.7.0';
+const VERSION_APP = '1.8.0';
 const $ = (s) => document.querySelector(s);
 const vista = $('#vista');
 
@@ -108,7 +108,7 @@ function aplicarEstado(j) {
   datos = {
     productos: j.productos, codigos: j.codigos, config: j.config, dotacion: j.dotacion,
     stock: j.stock, reposiciones: j.reposiciones, movimientos: j.movimientos, ultimaCopia: j.ultimaCopia, version: j.version,
-    catalogo: j.catalogo || [], noDuplicados: j.noDuplicados || [], imagenes: j.imagenes || null
+    catalogo: j.catalogo || [], noDuplicados: j.noDuplicados || [], imagenes: j.imagenes || null, pedidos: j.pedidos || []
   };
   guardar('datos', datos);
   ultimaSync = new Date().toISOString();
@@ -153,6 +153,8 @@ function resumenOp(op) {
   if (op.tipo === 'producto') return 'Ficha: ' + op.producto.nombre;
   if (op.tipo === 'fusionar') return 'Combinar productos';
   if (op.tipo === 'no_duplicado') return 'Marcar como distintos';
+  if (op.tipo === 'pedido') return 'Pedido ' + (op.pedido.numero || '') + ' · ' + op.pedido.lineas.length + ' líneas';
+  if (op.tipo === 'pedido_estado') return 'Pedido: ' + (op.estado !== undefined ? (op.estado || 'reabrir') : 'factura ' + op.factura);
   const m = op.movimiento, p = prods().get(m.producto_id);
   return `${m.tipo} · ${p ? p.nombre : m.producto_id} · ${m.cantidad}${m.lote ? ' · lote ' + m.lote : ''}`;
 }
@@ -396,6 +398,7 @@ VISTAS.inicio = () => {
       <button class="mosaico" data-intencion="salida"><b>Salida</b>Consumo, gabinete o caja</button>
       <button class="mosaico" data-ir="stock"><b>Stock</b>${datos.productos.filter((p) => p.activo && totalDe(s, p.id) > 0).length} con stock · ${datos.productos.filter((p) => p.activo).length} en catálogo</button>
       <button class="mosaico" data-ir="gabinetes"><b>Gabinetes</b>Dotación y reposición</button>
+      <button class="mosaico" data-ir="pedidos" style="grid-column:span 2"><b>Pedidos</b>${(() => { const n = (datos.pedidos || []).filter((x) => !x.estado).length; return n ? n + (n === 1 ? ' pedido en camino' : ' pedidos en camino') + ' · recibir' : 'Pegar un pedido hecho en la web del depósito'; })()}</button>
     </nav>
     <section class="lista" aria-label="Avisos">
       <h2>Avisos</h2>
@@ -998,6 +1001,8 @@ VISTAS.duplicados = (p) => {
 VISTAS.pedido = () => {
   titulo('Lista de pedido');
   const s = st();
+  const enCamino = new Map();
+  for (const ped of datos.pedidos || []) if (!ped.estado) for (const l of ped.lineas) { const f = faltaLinea(ped, l); if (f > 0) enCamino.set(l.producto_id, (enCamino.get(l.producto_id) || 0) + f); }
   const a = avisos(datos, s, hoy());
   const grupos = new Map();
   for (const b of a.bajoMinimo) {
@@ -1007,8 +1012,257 @@ VISTAS.pedido = () => {
   }
   vista.innerHTML = grupos.size ? [...grupos.entries()].sort().map(([prov, l]) => `
     <section class="tarjeta"><h2>${h(prov)}</h2>
-      ${l.map((b) => `<div class="hist"><span>${h(b.producto.nombre)}${b.producto.ref_proveedor ? ' · REF ' + h(b.producto.ref_proveedor) : ''}</span><span class="cifra">${h(formatoCantidad(b.total, b.producto))} / mín. ${b.producto.minimo}</span></div>`).join('')}
+      ${l.map((b) => `<div class="hist"><span>${h(b.producto.nombre)}${b.producto.ref_proveedor ? ' · REF ' + h(b.producto.ref_proveedor) : ''}${enCamino.get(b.producto.id) ? `<br><span class="chip">en camino ${+enCamino.get(b.producto.id).toFixed(2)}</span>` : ''}</span><span class="cifra">${h(formatoCantidad(b.total, b.producto))} / mín. ${b.producto.minimo}</span></div>`).join('')}
     </section>`).join('') : '<p class="vacio">Nada por debajo del mínimo.</p>';
+};
+
+
+/* ───────────── Pedidos: pegar el pedido de la web, recibir y asignar la factura ───────────── */
+const corto = (prov) => String(prov || '').replace(/\s*\(.*\)\s*$/, '').trim();
+/** Envases recibidos de una línea: lo del servidor + lo que aún está en la cola. */
+function recibidoLinea(ped, l) {
+  const origen = `pedido:${ped.id}:${l.linea}`;
+  let uds = l.recibido || 0;
+  for (const op of cola) if (op.tipo === 'movimiento' && op.movimiento.origen === origen && op.movimiento.tipo === 'ENTRADA') uds += Number(op.movimiento.cantidad) || 0;
+  const pr = prods().get(l.producto_id);
+  return uds / (pr?.uds_envase || 1);
+}
+const faltaLinea = (ped, l) => Math.max(0, l.cantidad - recibidoLinea(ped, l));
+const pedidoPorId = (id) => (datos.pedidos || []).find((x) => x.id === id);
+const euros = (n) => (Number(n) || 0).toFixed(2).replace('.', ',') + ' €';
+
+VISTAS.pedidos = () => {
+  titulo('Pedidos');
+  const ps = (datos.pedidos || []).slice().sort((a, b) => String(b.fecha).localeCompare(String(a.fecha)));
+  const abiertos = ps.filter((x) => !x.estado), cerrados = ps.filter((x) => x.estado);
+  const tarjeta = (x) => {
+    const total = x.lineas.length, completas = x.lineas.filter((l) => faltaLinea(x, l) <= 1e-9).length;
+    return `<button class="tarjeta item" data-ped="${h(x.id)}"><span class="entre"><span class="fuerte">${h(corto(x.proveedor) || 'Pedido')} · ${h(x.numero || '')}</span><span class="peq">${h(cad(x.fecha))}</span></span>
+      <span class="entre peq"><span>${completas} de ${total} líneas recibidas${x.factura ? ' · factura ' + h(x.factura) : ''}</span>${x.estado ? '<span class="chip gris">cerrado</span>' : completas === total ? '<span class="chip">recibido</span>' : completas ? '<span class="chip aviso">parcial</span>' : '<span class="chip">en camino</span>'}</span></button>`;
+  };
+  const viejo = datos.version && datos.version.localeCompare('1.6.0', 'es', { numeric: true }) < 0;
+  vista.innerHTML = `
+    ${viejo ? `<p class="nota">El servidor está en la versión ${h(datos.version)}: para guardar pedidos hace falta la 1.6.0. Pega el Codigo.gs nuevo en Apps Script y publica «Nueva versión».</p>` : ''}
+    <button class="btn grande" id="pegar" ${viejo ? 'disabled' : ''}>Pegar pedido</button>
+    <p class="peq">Copia el pedido en la web del depósito (todo el texto de la página del pedido) y pégalo aquí. Cuando llegue la caja, ábrelo y marca lo recibido.</p>
+    <section class="lista"><h2>En camino</h2>${abiertos.length ? abiertos.map(tarjeta).join('') : '<p class="peq">Ningún pedido pendiente.</p>'}</section>
+    ${cerrados.length ? `<section class="lista"><h2>Cerrados</h2>${cerrados.slice(0, 20).map(tarjeta).join('')}</section>` : ''}`;
+  $('#pegar').onclick = () => ir('pedidoPegar');
+  vista.querySelectorAll('[data-ped]').forEach((b) => { b.onclick = () => ir('pedidoVer', { id: b.dataset.ped }); });
+};
+
+VISTAS.pedidoPegar = (p) => {
+  titulo('Pegar pedido');
+  if (!p.lineas) {
+    vista.innerHTML = `
+      <form class="campos" id="f">
+        <label>Texto del pedido<textarea name="t" rows="10" placeholder="Pedido 10169186&#10;Fecha: 10/11/2026&#10;Producto…&#10;Referencia: 3109&#10;30,08 €&#10;1u.">${h(p.texto || '')}</textarea></label>
+        <button class="btn claro" type="button" id="portapapeles">Pegar desde el portapapeles</button>
+        <button class="btn grande">Leer pedido</button>
+      </form>`;
+    const f = $('#f');
+    $('#portapapeles').onclick = async () => {
+      try { f.t.value = await navigator.clipboard.readText(); } catch { aviso('Mantén pulsado en el recuadro y elige «Pegar»'); }
+    };
+    f.onsubmit = (e) => {
+      e.preventDefault();
+      p.texto = f.t.value;
+      const r = leerPedido(p.texto);
+      if (!r.lineas.length) { aviso('No encuentro líneas con «Referencia»: copia la página entera del pedido'); return; }
+      p.numero = r.numero; p.fecha = r.fecha || hoy();
+      p.proveedor = proveedorProbable(r.lineas, datos.catalogo || []) || leer('ultimoProveedorPedido', '');
+      p.base = r.lineas;
+      p.lineas = emparejarPedido(r.lineas, p.proveedor, datos.productos, datos.catalogo || []);
+      pintar();
+    };
+    return;
+  }
+  const pm = prods();
+  const provs = [...new Set((datos.catalogo || []).map((c) => c.proveedor).concat(datos.productos.map((x) => x.proveedor)).filter(Boolean))].sort();
+  const n = { ref: 0, parecido: 0, nuevo: 0 };
+  p.lineas.forEach((l) => { n[l.producto_id ? 'ref' : l.estado === 'parecido' ? 'parecido' : 'nuevo']++; });
+  const repetido = (datos.pedidos || []).find((x) => x.numero && x.numero === p.numero && x.proveedor === p.proveedor);
+  vista.innerHTML = `
+    <section class="tarjeta"><div class="campos">
+      <label>Depósito<input id="prov" list="provsP" value="${h(p.proveedor)}"><datalist id="provsP">${provs.map((x) => `<option value="${h(x)}">`).join('')}</datalist></label>
+      <div class="fila"><label style="flex:1">Nº de pedido<input id="num" value="${h(p.numero || '')}"></label><label style="flex:1">Fecha<input id="fec" type="date" value="${h(p.fecha)}"></label></div>
+    </div></section>
+    ${repetido ? '<p class="nota info">Este pedido ya está en la app: al guardar se actualiza (no se duplica).</p>' : ''}
+    <p class="peq"><span class="chip">${n.ref} en el catálogo</span> <span class="chip aviso">${n.parecido} por confirmar</span> <span class="chip gris">${n.nuevo} nuevos</span></p>
+    <div class="lista">${p.lineas.map((l, i) => {
+      const pr = l.producto_id ? pm.get(l.producto_id) : null;
+      const cab = `<span class="fuerte">${h(l.descripcion)}</span><span class="peq">REF ${h(l.ref)} · ${l.cantidad} ${l.cantidad === 1 ? 'envase' : 'envases'} · ${euros(l.precio)}</span>`;
+      if (pr) return `<div class="tarjeta">${cab}<span class="peq"><span class="chip">${l.estado === 'ref' ? 'En el catálogo' : 'Elegido'}</span> ${l.estado === 'ref' && normaliza(pr.nombre) === normaliza(l.descripcion) ? '' : '→ ' + h(pr.nombre)}</span>${l.estado !== 'ref' ? `<button class="btn claro" data-quitar="${i}">No es este: producto nuevo</button>` : ''}</div>`;
+      const sug = l.sugerencias.map((id) => pm.get(id)).filter(Boolean).slice(0, 3);
+      return `<div class="tarjeta">${cab}<span class="peq"><span class="chip ${sug.length ? 'aviso' : 'gris'}">Nuevo: se dará de alta</span></span>
+        ${sug.length ? `<span class="peq">¿Es alguno de estos?</span>${sug.map((x) => `<button class="btn claro" data-elegir="${i}" data-pid="${h(x.id)}" style="text-align:left">Sí: ${h(x.nombre)}${(datos.catalogo || []).filter((c) => c.producto_id === x.id).slice(0, 2).map((c) => ' · ' + h(corto(c.proveedor)) + ' ' + h(c.ref)).join('')}</button>`).join('')}` : ''}</div>`;
+    }).join('')}</div>
+    <button class="btn grande" id="guardar">Guardar pedido en camino</button>
+    <button class="btn claro" id="otro">Pegar otro texto</button>`;
+  $('#prov').onchange = (e) => {
+    p.proveedor = e.target.value.trim();
+    p.lineas = emparejarPedido(p.base, p.proveedor, datos.productos, datos.catalogo || []);
+    pintar();
+  };
+  $('#num').oninput = (e) => { p.numero = e.target.value.trim(); };
+  $('#fec').oninput = (e) => { p.fecha = e.target.value; };
+  vista.querySelectorAll('[data-elegir]').forEach((b) => { b.onclick = () => { const l = p.lineas[b.dataset.elegir]; l.producto_id = b.dataset.pid; l.estado = 'elegido'; pintar(); }; });
+  vista.querySelectorAll('[data-quitar]').forEach((b) => { b.onclick = () => { const l = p.lineas[b.dataset.quitar]; l.producto_id = ''; l.estado = l.sugerencias.length ? 'parecido' : 'nuevo'; pintar(); }; });
+  $('#otro').onclick = () => { p.lineas = null; pintar(); };
+  $('#guardar').onclick = () => {
+    if (!p.proveedor) { aviso('Indica el depósito'); $('#prov').focus(); return; }
+    if (!p.numero && !confirm('El pedido no tiene número. ¿Guardarlo igualmente?')) return;
+    guardar('ultimoProveedorPedido', p.proveedor);
+    const id = repetido ? repetido.id : 'PD-' + nuevoUuid().slice(0, 8).toUpperCase();
+    const lineas = p.lineas.map((l) => {
+      let pid = l.producto_id;
+      if (!pid) {
+        const prod = {
+          id: nuevoIdProducto(), nombre: l.descripcion.slice(0, 120), categoria: '', armario: '', proveedor: p.proveedor, ref_proveedor: l.ref,
+          modo: 'unidades', uds_envase: 1, lote: false, minimo: 0, notas: `Alta desde el pedido ${p.numero || ''}`.trim(), activo: true, estado_ia: ''
+        };
+        encolar({ tipo: 'producto', producto: prod, codigos: [] });
+        datos.productos.push(prod);
+        pid = prod.id;
+      }
+      if (!(datos.catalogo || []).some((c) => c.proveedor === p.proveedor && c.ref === l.ref)) (datos.catalogo = datos.catalogo || []).push({ proveedor: p.proveedor, ref: l.ref, descripcion: l.descripcion, precio: l.precio, fecha: p.fecha, producto_id: pid });
+      return { linea: l.linea, producto_id: pid, ref: l.ref, descripcion: l.descripcion, cantidad: l.cantidad, precio: l.precio, iva: l.iva };
+    });
+    const pedido = { id, proveedor: p.proveedor, numero: p.numero || '', fecha: p.fecha || hoy(), lineas };
+    encolar({ tipo: 'pedido', pedido });
+    const previo = repetido ? repetido.lineas : [];
+    const local = { ...pedido, estado: repetido ? repetido.estado : '', factura: repetido ? repetido.factura : '', lineas: lineas.map((l) => ({ ...l, recibido: previo.find((x) => x.linea === l.linea)?.recibido || 0 })) };
+    datos.pedidos = (datos.pedidos || []).filter((x) => x.id !== id).concat([local]);
+    guardar('datos', datos);
+    aviso('Pedido guardado: en camino');
+    ir('pedidoVer', { id }, true);
+  };
+};
+
+VISTAS.pedidoVer = ({ id }) => {
+  const ped = pedidoPorId(id);
+  if (!ped) { atras(); return; }
+  titulo('Pedido ' + (ped.numero || ''));
+  const pm = prods();
+  const lineas = ped.lineas.map((l) => ({ l, pr: pm.get(l.producto_id), rec: recibidoLinea(ped, l), falta: faltaLinea(ped, l) }));
+  const pendientes = lineas.filter((x) => x.falta > 1e-9);
+  const sinLote = pendientes.filter((x) => x.pr && !x.pr.lote);
+  const conLote = pendientes.filter((x) => x.pr && x.pr.lote);
+  const recibidoAlgo = lineas.some((x) => x.rec > 0);
+  const totalEur = ped.lineas.reduce((a, l) => a + l.precio * l.cantidad, 0);
+  vista.innerHTML = `
+    <section class="tarjeta"><h2>${h(ped.proveedor)}</h2>
+      <span class="peq">Pedido ${h(ped.numero || 's/n')} · ${h(cad(ped.fecha))} · ${ped.lineas.length} líneas · ${euros(totalEur)} sin IVA</span>
+      <span>${pendientes.length ? `Faltan ${pendientes.length} de ${ped.lineas.length} líneas` : '<b>Todo recibido</b>'}${ped.estado ? ' · <span class="chip gris">cerrado</span>' : ''}</span>
+    </section>
+    ${!ped.estado && sinLote.length ? `<button class="btn grande" id="todo">Ha llegado todo lo que falta${conLote.length ? ' (sin lote)' : ''}</button>` : ''}
+    ${!ped.estado && conLote.length ? `<p class="nota info">${conLote.length} ${conLote.length === 1 ? 'producto lleva' : 'productos llevan'} lote y caducidad: tócalos al recibirlos para escanear la caja.</p>` : ''}
+    <div class="lista">${lineas.map(({ l, pr, rec, falta }) => `<button class="tarjeta item con-mini" data-linea="${l.linea}">
+      ${pr ? cajaMini(pr) : '<span class="mini"></span>'}
+      <span class="cuerpo">
+        <span class="fuerte">${h(l.descripcion || (pr && pr.nombre) || '')}</span>
+        <span class="peq ref-lista">${h(corto(ped.proveedor))} ${h(l.ref)}</span>
+        <span class="entre peq"><span>Pedido ${l.cantidad} · recibido ${+rec.toFixed(2)}</span>${falta <= 1e-9 ? '<span class="chip">completo</span>' : pr && pr.lote ? '<span class="chip aviso">lote · escanear</span>' : rec > 0 ? `<span class="chip aviso">faltan ${+falta.toFixed(2)}</span>` : '<span class="chip gris">pendiente</span>'}</span>
+      </span></button>`).join('')}</div>
+    <section class="tarjeta"><form class="campos" id="fFac">
+      <label>Nº de factura<input name="factura" value="${h(ped.factura || '')}" placeholder="Cuando llegue la factura" autocomplete="off"></label>
+      <button class="btn claro">Guardar nº de factura</button>
+    </form></section>
+    <div class="fila">
+      ${ped.estado ? '<button class="btn claro" id="reabrir" style="flex:1">Reabrir</button>' : '<button class="btn claro" id="cerrar" style="flex:1">Cerrar pedido</button>'}
+      ${recibidoAlgo ? '' : '<button class="btn claro" id="anular" style="flex:1">Borrar pedido</button>'}
+    </div>`;
+  activarMiniaturas(vista);
+  const cambiarEstado = (cambios) => {
+    encolar({ tipo: 'pedido_estado', id, ...cambios });
+    Object.assign(ped, cambios);
+    if (cambios.estado === 'anulado') datos.pedidos = datos.pedidos.filter((x) => x.id !== id);
+    guardar('datos', datos);
+  };
+  vista.querySelectorAll('[data-linea]').forEach((b) => {
+    b.onclick = () => {
+      const x = lineas.find((y) => String(y.l.linea) === b.dataset.linea);
+      if (!x.pr) { aviso('Producto no encontrado'); return; }
+      if (x.falta > 1e-9 && !ped.estado) ir('recibirLinea', { id, linea: x.l.linea });
+      else ir('producto', { pid: x.pr.id });
+    };
+  });
+  if ($('#todo')) $('#todo').onclick = () => {
+    if (!confirm(`¿Dar por recibido${sinLote.length === 1 ? '' : 's'} ${sinLote.length} ${sinLote.length === 1 ? 'producto' : 'productos'}?`)) return;
+    for (const { l, pr, falta } of sinLote) {
+      encolar({ tipo: 'movimiento', movimiento: {
+        uuid: nuevoUuid(), fecha: new Date().toISOString(), tipo: 'ENTRADA', producto_id: pr.id, lote: '', caducidad: '',
+        cantidad: Math.round(falta * pr.uds_envase * 1000) / 1000, factura: ped.factura || 'Pedido ' + (ped.numero || ''), origen: `pedido:${id}:${l.linea}`, nota: ''
+      } });
+    }
+    aviso('Entrada registrada');
+    pintar();
+  };
+  $('#fFac').onsubmit = (e) => { e.preventDefault(); cambiarEstado({ factura: e.target.factura.value.trim() }); aviso('Factura guardada'); pintar(); };
+  if ($('#cerrar')) $('#cerrar').onclick = () => {
+    if (pendientes.length && !confirm(`Faltan ${pendientes.length} líneas por recibir. ¿Cerrar el pedido igualmente?`)) return;
+    cambiarEstado({ estado: 'cerrado' }); pintar();
+  };
+  if ($('#reabrir')) $('#reabrir').onclick = () => { cambiarEstado({ estado: '' }); pintar(); };
+  if ($('#anular')) $('#anular').onclick = () => {
+    if (!confirm('¿Borrar este pedido? No se ha recibido nada de él.')) return;
+    cambiarEstado({ estado: 'anulado' }); atras();
+  };
+};
+
+VISTAS.recibirLinea = ({ id, linea }) => {
+  const ped = pedidoPorId(id);
+  const l = ped && ped.lineas.find((x) => x.linea === linea);
+  const pr = l && prods().get(l.producto_id);
+  if (!pr) { atras(); return; }
+  titulo('Recibir');
+  const falta = faltaLinea(ped, l);
+  vista.innerHTML = `
+    <section class="tarjeta"><h2>${h(pr.nombre)}</h2><span class="peq">Pedido ${h(ped.numero || '')} · ${h(corto(ped.proveedor))} ${h(l.ref)} · pedido ${l.cantidad}, faltan ${+falta.toFixed(2)}${pr.uds_envase > 1 ? ' · ' + pr.uds_envase + ' ud. por envase' : ''}</span></section>
+    <form class="campos" id="f">
+      ${campoCantidad('envases', +falta.toFixed(2), 'Envases recibidos')}
+      ${pr.lote ? `<button type="button" class="btn" id="leerCaja">Escanear la caja (lote y caducidad)</button>
+      <label>Lote *<input name="lote" required autocomplete="off"></label>
+      <label>Caducidad (AAAA-MM o AAAA-MM-DD)<input name="caducidad" placeholder="2028-02" pattern="\\d{4}-\\d{2}(-\\d{2})?" autocomplete="off"></label>
+      <label class="check"><input type="checkbox" name="sinLote"> Este producto no tiene lote (quitar el control de lote)</label>` : ''}
+      <button class="btn grande">Registrar entrada</button>
+    </form>`;
+  activarCantidad();
+  const f = $('#f');
+  if (pr.lote) {
+    f.sinLote.onchange = () => { f.lote.required = !f.sinLote.checked; f.lote.disabled = f.caducidad.disabled = f.sinLote.checked; };
+    $('#leerCaja').onclick = () => abrirEscaner((raw, formato) => {
+      const lec = leerCodigo(raw, formato);
+      const otro = codigos().get(lec.clave);
+      if (otro && otro !== pr.id) aviso('Ojo: ese código es de otro producto');
+      else if (!otro && lec.clave) {
+        // El código queda enlazado a este producto: la próxima vez se reconoce al escanear.
+        encolar({ tipo: 'producto', producto: { ...pr }, codigos: [lec.clave] });
+        datos.codigos.push({ codigo: lec.clave, producto_id: pr.id }); guardar('datos', datos);
+      }
+      if (lec.lote) f.lote.value = lec.lote;
+      if (lec.caducidad) f.caducidad.value = lec.caducidad;
+      if (!lec.lote && !lec.caducidad) aviso('El código no trae lote ni caducidad: escríbelos a mano');
+    }, 'Apunta al código de la caja');
+  }
+  f.onsubmit = (e) => {
+    e.preventDefault();
+    const env = Number(f.envases.value);
+    if (!(env > 0)) { aviso('Indica cuántos envases'); return; }
+    const quitarLote = pr.lote && f.sinLote.checked;
+    if (quitarLote) {
+      const nuevo = { ...pr, lote: false };
+      encolar({ tipo: 'producto', producto: nuevo, codigos: [] });
+      Object.assign(pr, nuevo); guardar('datos', datos);
+    }
+    encolar({ tipo: 'movimiento', movimiento: {
+      uuid: nuevoUuid(), fecha: new Date().toISOString(), tipo: 'ENTRADA', producto_id: pr.id,
+      lote: pr.lote ? f.lote.value.trim() : '', caducidad: pr.lote ? f.caducidad.value.trim() : '',
+      cantidad: Math.round(env * pr.uds_envase * 1000) / 1000, factura: ped.factura || 'Pedido ' + (ped.numero || ''), origen: `pedido:${id}:${l.linea}`, nota: ''
+    } });
+    aviso('Entrada registrada');
+    atras();
+  };
 };
 
 VISTAS.gabinetes = (p) => {

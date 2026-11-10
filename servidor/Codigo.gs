@@ -13,7 +13,7 @@
  *  - Editar la ficha de un producto nunca mueve stock.
  */
 
-var VERSION_SERVIDOR = '1.5.1';
+var VERSION_SERVIDOR = '1.6.0';
 
 var HOJAS = {
   PRODUCTOS: ['id', 'nombre', 'categoria', 'proveedor', 'ref_proveedor', 'uds_envase', 'modo', 'lote', 'armario', 'minimo', 'activo', 'notas', 'actualizado', 'foto', 'estado_ia', 'intentos_ia', 'img_estado', 'fusionado_en'],
@@ -25,7 +25,8 @@ var HOJAS = {
   STOCK: ['producto_id', 'nombre', 'categoria', 'armario', 'lote', 'caducidad', 'unidades', 'uds_envase', 'minimo_producto', 'total_producto', 'bajo_minimo'],
   RECHAZADOS: ['recibido', 'uuid', 'motivo', 'datos'],
   CATALOGO: ['proveedor', 'ref', 'descripcion', 'precio', 'fecha', 'factura', 'producto_id', 'alta'],
-  NO_DUPLICADOS: ['producto_a', 'producto_b', 'fecha']
+  NO_DUPLICADOS: ['producto_a', 'producto_b', 'fecha'],
+  PEDIDOS: ['pedido', 'linea', 'proveedor', 'numero', 'fecha', 'producto_id', 'ref', 'descripcion', 'cantidad', 'precio', 'iva', 'estado', 'factura', 'alta']
 };
 
 var CONFIG_INICIAL = [
@@ -214,6 +215,26 @@ function calcularStock_(movs, alias) {
   return st;
 }
 
+/** Pedidos con lo recibido de cada línea (suma de las entradas con origen «pedido:ID:línea»). Sin los anulados. */
+function pedidos_(movs, anulados, alias) {
+  var recibido = {};
+  movs.forEach(function (m) {
+    if (m.tipo !== 'ENTRADA' || anulados[m.uuid] || String(m.origen).indexOf('pedido:') !== 0) return;
+    var k = String(m.origen).slice(7);
+    recibido[k] = (recibido[k] || 0) + (Number(m.cantidad) || 0);
+  });
+  var porId = {}, orden = [];
+  filasOpc_('PEDIDOS').forEach(function (x) {
+    if (x.estado === 'anulado') return;
+    if (!porId[x.pedido]) { porId[x.pedido] = { id: x.pedido, proveedor: x.proveedor, numero: x.numero, fecha: x.fecha, estado: x.estado, factura: x.factura, alta: x.alta, lineas: [] }; orden.push(x.pedido); }
+    porId[x.pedido].lineas.push({ linea: Number(x.linea), producto_id: x.producto_id ? real_(alias, x.producto_id) : '', ref: x.ref, descripcion: x.descripcion,
+      cantidad: Number(x.cantidad) || 0, precio: Number(x.precio) || 0, iva: x.iva, recibido: recibido[x.pedido + ':' + x.linea] || 0 });
+  });
+  // Abiertos todos; cerrados, los de los últimos 90 días.
+  var limite = new Date(Date.now() - 90 * 864e5).toISOString().slice(0, 10);
+  return orden.map(function (id) { return porId[id]; }).filter(function (p) { return !p.estado || p.fecha >= limite; });
+}
+
 function leerEstado_() {
   var movs = filas_('MOVIMIENTOS');
   var prodFilas = filas_('PRODUCTOS');
@@ -254,6 +275,7 @@ function leerEstado_() {
       return { proveedor: c.proveedor, ref: c.ref, descripcion: c.descripcion, precio: Number(c.precio) || 0, fecha: c.fecha, producto_id: real_(alias, c.producto_id) };
     }),
     noDuplicados: filasOpc_('NO_DUPLICADOS').map(function (x) { return [x.producto_a, x.producto_b]; }),
+    pedidos: pedidos_(movs, anulados, alias),
     config: config,
     dotacion: filas_('DOTACION').map(function (d) { return { gabinete: d.gabinete, producto_id: d.producto_id, cantidad: Number(d.cantidad) || 0, dias_revision: Number(d.dias_revision) || 0 }; }),
     stock: stock,
@@ -298,6 +320,7 @@ function procesarOps_(ops) {
 
     var nuevosMovs = [], rechazados = [], resultados = [];
     var cambiosProd = false, hayPendientes = false, cambiosCodigos = false, noDup = [], fusionesHechas = [];
+    var pedFilas = null, cambiosPed = false, refsPedido = [];
     asegurarCabeceras_('PRODUCTOS');
 
     ops.forEach(function (op) {
@@ -361,6 +384,48 @@ function procesarOps_(ops) {
           return;
         }
 
+        if (op.tipo === 'pedido') {
+          var pd = op.pedido || {};
+          var pidPed = texto_(pd.id, 40);
+          if (!/^PD-[A-Za-z0-9-]+$/.test(pidPed)) throw new Error('Pedido sin identificador');
+          var lineas = Array.isArray(pd.lineas) ? pd.lineas : [];
+          if (!lineas.length || lineas.length > 300) throw new Error('El pedido no tiene líneas');
+          if (!pedFilas) pedFilas = filasOpc_('PEDIDOS');
+          var previas = pedFilas.filter(function (x) { return x.pedido === pidPed; });
+          var base = { proveedor: texto_(pd.proveedor, 80), numero: texto_(pd.numero, 40), fecha: fechaCad_(pd.fecha) || ahora.slice(0, 10),
+            estado: previas.length ? previas[0].estado : '', factura: previas.length ? previas[0].factura : '' };
+          var nuevasPed = lineas.map(function (l, i) {
+            var prodL = texto_(l.producto_id, 40);
+            if (prodL) { if (prodIdx[prodL] === undefined) throw new Error('Producto desconocido en la línea ' + (i + 1)); prodL = real_(alias, prodL); }
+            var cant = Number(l.cantidad);
+            if (!isFinite(cant) || cant <= 0 || cant > 100000) throw new Error('Cantidad no válida en la línea ' + (i + 1));
+            return { pedido: pidPed, linea: String(Number(l.linea) || i + 1), proveedor: base.proveedor, numero: base.numero, fecha: base.fecha,
+              producto_id: prodL, ref: texto_(l.ref, 60), descripcion: texto_(l.descripcion, 200), cantidad: String(cant),
+              precio: String(Number(l.precio) || 0), iva: texto_(l.iva, 4), estado: base.estado, factura: base.factura, alta: previas.length ? previas[0].alta : ahora };
+          });
+          pedFilas = pedFilas.filter(function (x) { return x.pedido !== pidPed; }).concat(nuevasPed);
+          cambiosPed = true;
+          nuevasPed.forEach(function (l) { if (l.ref && l.producto_id) refsPedido.push(l); });
+          resultados.push({ op: op.op_id, estado: 'ok' });
+          return;
+        }
+
+        if (op.tipo === 'pedido_estado') {
+          var idPe = texto_(op.id, 40);
+          if (!pedFilas) pedFilas = filasOpc_('PEDIDOS');
+          var suyas = pedFilas.filter(function (x) { return x.pedido === idPe; });
+          if (!suyas.length) throw new Error('Pedido desconocido');
+          var est = texto_(op.estado, 12);
+          if (op.estado !== undefined && ['', 'cerrado', 'anulado'].indexOf(est) < 0) throw new Error('Estado de pedido no válido');
+          suyas.forEach(function (x) {
+            if (op.estado !== undefined) x.estado = est;
+            if (op.factura !== undefined) x.factura = texto_(op.factura, 60);
+          });
+          cambiosPed = true;
+          resultados.push({ op: op.op_id, estado: 'ok' });
+          return;
+        }
+
         if (op.tipo === 'no_duplicado') {
           noDup.push([texto_(op.a, 40), texto_(op.b, 40), ahora]);
           resultados.push({ op: op.op_id, estado: 'ok' });
@@ -410,6 +475,13 @@ function procesarOps_(ops) {
     anadir_('RECHAZADOS', rechazados);
     if (noDup.length) { asegurarHoja_('NO_DUPLICADOS'); anadir_('NO_DUPLICADOS', noDup); }
     if (fusionesHechas.length) repuntarFusiones_(fusionesHechas);
+    if (cambiosPed) {
+      var hp = asegurarHoja_('PEDIDOS');
+      var cabP = HOJAS.PEDIDOS;
+      if (hp.getLastRow() > 1) hp.getRange(2, 1, hp.getLastRow() - 1, cabP.length).clearContent();
+      if (pedFilas.length) hp.getRange(2, 1, pedFilas.length, cabP.length).setNumberFormat('@').setValues(pedFilas.map(function (x) { return cabP.map(function (c) { return x[c]; }); }));
+    }
+    if (refsPedido.length) catalogoDesdePedido_(refsPedido, ahora);
     if (cambiosProd || nuevosMovs.length) recalcularStock();
     if (hayPendientes) { try { programarIdentificacion_(); } catch (e) { Logger.log('No se pudo programar la identificación: ' + e); } }
 
@@ -896,6 +968,32 @@ function leerFoto_(pid) {
  * descripcion, precio, fecha, factura. Se puede repetir: no duplica (clave proveedor + referencia).
  */
 function claveCat_(prov, ref) { return String(prov).trim().toLowerCase() + '|' + String(ref).trim().toUpperCase().replace(/\s+/g, ''); }
+
+/** Las líneas de un pedido enlazadas a un producto pasan al catálogo (depósito + referencia + último precio). */
+function catalogoDesdePedido_(lineas, ahora) {
+  var hCat = asegurarHoja_('CATALOGO');
+  var cat = filas_('CATALOGO');
+  var porClave = {};
+  cat.forEach(function (c, i) { porClave[claveCat_(c.proveedor, c.ref)] = i; });
+  var cambio = false, nuevas = [];
+  lineas.forEach(function (l) {
+    if (!l.proveedor) return;
+    var k = claveCat_(l.proveedor, l.ref);
+    var i = porClave[k];
+    var fac = 'Pedido ' + l.numero;
+    if (i === undefined) {
+      porClave[k] = cat.length + nuevas.length;
+      nuevas.push([l.proveedor, l.ref, l.descripcion, l.precio, l.fecha, fac, l.producto_id, ahora]);
+      return;
+    }
+    var e = cat[i];
+    if (!e.producto_id) { e.producto_id = l.producto_id; cambio = true; }
+    if (String(l.fecha) >= String(e.fecha) && Number(l.precio) > 0) { e.precio = l.precio; e.fecha = l.fecha; e.factura = fac; e.descripcion = l.descripcion || e.descripcion; cambio = true; }
+  });
+  var cab = HOJAS.CATALOGO;
+  if (cambio && cat.length) hCat.getRange(2, 1, cat.length, cab.length).setNumberFormat('@').setValues(cat.map(function (c) { return cab.map(function (k) { return c[k]; }); }));
+  anadir_('CATALOGO', nuevas);
+}
 
 function cargarCatalogo() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();

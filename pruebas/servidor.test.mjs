@@ -384,3 +384,46 @@ test('modelos de Gemini: se piden los disponibles y se descartan los retirados',
   props.GEMINI_MODELO = 'gemini-3.5-flash-lite';
   assert.equal(ctx.modelosGemini_()[0], 'gemini-3.5-flash-lite');
 });
+
+test('pedidos: pedido en camino, producto nuevo en el mismo envío, recepción parcial, catálogo y cierre', () => {
+  const { llamar, hojas } = crearEntorno();
+  const nuevo = { id: 'P-NUEVO001', nombre: 'Gasas estériles 7.5x6.5', categoria: '', proveedor: 'Dentaltix (Dentared)', ref_proveedor: '270712', uds_envase: 1, modo: 'unidades', lote: false, minimo: 0 };
+  const pedido = { id: 'PD-0001', proveedor: 'Dentaltix (Dentared)', numero: '10169186', fecha: '2026-11-10', lineas: [
+    { linea: 1, producto_id: guantes.id, ref: 'GD05NB', descripcion: 'Guantes S', cantidad: 2, precio: 5.5, iva: '21' },
+    { linea: 2, producto_id: nuevo.id, ref: '270712', descripcion: 'Gasas Algodón Estériles', cantidad: 1, precio: 36.85, iva: '10' },
+    { linea: 3, producto_id: implante.id, ref: 'IMP-1', descripcion: 'Implante', cantidad: 1, precio: 100, iva: '21' }
+  ] };
+  let r = llamar({ accion: 'enviar', ops: [
+    { tipo: 'producto', op_id: 'p1', producto: guantes },
+    { tipo: 'producto', op_id: 'p2', producto: implante },
+    { tipo: 'producto', op_id: 'p3', producto: nuevo },
+    { tipo: 'pedido', op_id: 'pd1', pedido },
+    { tipo: 'pedido', op_id: 'pd2', pedido: { ...pedido, id: 'PD-0002', lineas: [{ linea: 1, producto_id: 'P-NOEXISTE', cantidad: 1 }] } }
+  ] });
+  const est = Object.fromEntries(r.resultados.map((x) => [x.op, x.estado]));
+  assert.equal(est.pd1, 'ok'); assert.equal(est.pd2, 'rechazado');
+  assert.equal(r.pedidos.length, 1);
+  assert.equal(r.pedidos[0].lineas.length, 3);
+  assert.equal(r.pedidos[0].numero, '10169186');
+  assert.ok(r.catalogo.some((c) => c.ref === '270712' && c.producto_id === nuevo.id && c.precio === 36.85));
+
+  // Primer envío: llegan los guantes (2) y el implante con su lote
+  r = llamar({ accion: 'enviar', ops: [
+    mov({ tipo: 'ENTRADA', producto_id: guantes.id, cantidad: 2, factura: 'Pedido 10169186', origen: 'pedido:PD-0001:1' }),
+    mov({ tipo: 'ENTRADA', producto_id: implante.id, lote: 'L1', caducidad: '2030-01', cantidad: 1, origen: 'pedido:PD-0001:3' })
+  ] });
+  const l = Object.fromEntries(r.pedidos[0].lineas.map((x) => [x.linea, x.recibido]));
+  assert.deepEqual(l, { 1: 2, 2: 0, 3: 1 });
+
+  // Volver a guardar el pedido (corrección) no pierde lo recibido ni duplica filas
+  r = llamar({ accion: 'enviar', ops: [{ tipo: 'pedido', op_id: 'pd3', pedido }] });
+  assert.equal(hojas.get('PEDIDOS').getLastRow(), 4);
+  assert.equal(r.pedidos[0].lineas[0].recibido, 2);
+
+  // Factura y cierre
+  r = llamar({ accion: 'enviar', ops: [{ tipo: 'pedido_estado', op_id: 'pe1', id: 'PD-0001', factura: 'DR2026_80000', estado: 'cerrado' }] });
+  assert.equal(r.pedidos[0].estado, 'cerrado');
+  assert.equal(r.pedidos[0].factura, 'DR2026_80000');
+  r = llamar({ accion: 'enviar', ops: [{ tipo: 'pedido_estado', op_id: 'pe2', id: 'PD-0001', estado: 'anulado' }] });
+  assert.equal(r.pedidos.length, 0);
+});

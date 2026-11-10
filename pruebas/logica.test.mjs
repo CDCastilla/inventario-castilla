@@ -108,3 +108,39 @@ test('coincidenciasTexto: busca por lo leído en la caja (nombre, marca y refere
   const r3 = coincidenciasTexto({ nombre: 'Silicona', marca: 'Zhermack', ref_proveedor: '09-VA-019' }, productos, catalogo);
   assert.equal(r3[0].p.id, 'A'); assert.ok(r3[0].porRef);
 });
+
+test('leerPedido: pedido pegado de Dentaltix', async () => {
+  const { leerPedido, proveedorProbable, emparejarPedido } = await import('../js/logica.js');
+  const { readFileSync } = await import('node:fs');
+  const txt = readFileSync(new URL('./pedido-dentaltix.txt', import.meta.url), 'utf8');
+  const p = leerPedido(txt);
+  assert.equal(p.numero, '10169186');
+  assert.equal(p.fecha, '2026-11-10');
+  assert.equal(p.lineas.length, 18);
+  assert.deepEqual(p.lineas[0], { linea: 1, descripcion: 'Bioklair Diario: Limpiador de Sistemas de Aspiración (5 L)', ref: '3109', precio: 30.08, cantidad: 1, iva: '21' });
+  assert.equal(p.lineas[11].cantidad, 2);
+  assert.equal(p.lineas[17].ref, 'DTX-VI801-012');
+  assert.equal(p.lineas[17].precio, 0);
+  assert.ok(!p.lineas.some((l) => l.ref === 'SHIPPING'));
+  // Mismo pedido copiado con tabuladores en una fila
+  const p2 = leerPedido('Pedido 123456\nGasas estériles\tReferencia: 270712\t36,85 €\t3u.\t10%');
+  assert.equal(p2.lineas[0].cantidad, 3); assert.equal(p2.lineas[0].ref, '270712');
+
+  const catalogo = [
+    { proveedor: 'Dentaltix (Dentared)', ref: 'DTX-VI92103', producto_id: 'A3', descripcion: 'Composite Fluido (Jeringa de 1 ml) - A3' },
+    { proveedor: 'Dentaltix (Dentared)', ref: 'DTX-VO2269', producto_id: 'PB', descripcion: 'Profluorid Varnish Bubble gum' },
+    { proveedor: 'Proclinic', ref: '3109', producto_id: 'OTRO', descripcion: 'Otra cosa' }
+  ];
+  const productos = [
+    { id: 'A3', nombre: 'Composite Fluido (Jeringa de 1 ml) - A3', activo: true },
+    { id: 'PB', nombre: 'Profluorid Varnish + BioMin barniz fluoruro Bubble gum', activo: true },
+    { id: 'OTRO', nombre: 'Otra cosa', activo: true }
+  ];
+  const prov = proveedorProbable(p.lineas, catalogo);
+  assert.equal(prov, 'Dentaltix (Dentared)');
+  const e = emparejarPedido(p.lineas, prov, productos, catalogo);
+  assert.equal(e[11].estado, 'ref'); assert.equal(e[11].producto_id, 'A3');
+  assert.equal(e[0].estado, 'nuevo'); // la ref 3109 es de otro depósito
+  assert.equal(e[8].estado, 'parecido'); assert.equal(e[8].producto_id, ''); // Menta: se sugiere, no se da por hecho
+  assert.deepEqual(e[8].sugerencias, ['PB']);
+});
